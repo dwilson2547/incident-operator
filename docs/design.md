@@ -448,11 +448,11 @@ models:
   profiles:
     qwen3vl-4b:  {backend: gpu-scheduler, model: qwen3vl,  contextTokens: 16384}
     qwen3-8b:    {backend: gpu-scheduler, model: qwen3-8b, contextTokens: 16384}
-    gemma3-12b:  {backend: openai, baseUrl: http://<lmstudio-host>:1234/v1, model: "<lm studio id>",
+    gemma4-12b:  {backend: openai, baseUrl: http://<lmstudio-host>:1234/v1, model: google/gemma-4-12b,
                   contextTokens: 8192, sampling: {temperature: 0}}
     bonsai-27b:  {backend: openai, baseUrl: http://<llama.cpp host>:8080/v1, model: bonsai,
                   contextTokens: 65536, reasoningEffort: medium}
-  shadow: [gemma3-12b]        # also run these on every incident, for comparison only (§9.3)
+  shadow: [gemma4-12b]        # also run these on every incident, for comparison only (§9.3)
 ```
 
 - **Backends:** `gpu-scheduler` (any of its text adapters) or `openai` (any OpenAI-compatible server: LM Studio,
@@ -460,7 +460,7 @@ models:
   `openai`.
 - **`contextTokens`** sets that profile's budgets (§6.4) as a fraction of its window. A larger-context model like
   Bonsai gets more room for precursors and requested results without changing any runbook.
-- **Per-runbook override** (`model: gemma3-12b` in the frontmatter) for a runbook that does better on one model.
+- **Per-runbook override** (`model: gemma4-12b` in the frontmatter) for a runbook that does better on one model.
 - **Prompts** are part of the profile's prompt set, versioned, with one default set shared by all profiles. A model
   that needs a different phrasing gets its own variant without affecting the others.
 
@@ -478,7 +478,7 @@ default is settled.
 
 ### 9.4 Model choice (open)
 
-Candidates from the user's LM Studio tests: Gemma 3 12B (best overall with the triage prompt, by the user's
+Candidates from the user's LM Studio tests: Gemma 4 12B (best overall with the triage prompt, by the user's
 judgement), Mistral 3 3B, and Bonsai 27B (Ternary Bonsai 2 recommended: `Q2_0` on stock llama.cpp ≥ b11556). Bonsai
 has the largest usable context but read worse. Measured 2026-10-31 on the RTX 5080 with 11 real failures (10
 scraper runs from scrape-job-manager history, one OOMKilled pod), using the user's prompt: Qwen3-VL-4B took 9.9
@@ -638,7 +638,7 @@ After several approved runs where the post-check passed, raising it to `auto` is
 
 ## 15. Open questions
 
-- **Model:** Qwen3-VL-4B (already loaded, no swap) or a dedicated text model (Gemma 3 12B, Mistral 3 3B, Bonsai),
+- **Model:** Qwen3-VL-4B (already loaded, no swap) or a dedicated text model (Gemma 4 12B, Mistral 3 3B, Bonsai),
   via shadow runs and replay (§9.3, §9.5). A llama.cpp adapter in gpu-scheduler would be its own piece of work.
 - **Name:** `incident-operator` is a placeholder.
 - **Scraper failures:** scrape-job-manager already classifies run failures and emails on state changes. Does this
