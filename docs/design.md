@@ -71,8 +71,8 @@ Building our own also follows the existing operator pattern in this workspace (s
 
 | Thing | Format | Where |
 |---|---|---|
-| Runbook | Markdown with YAML frontmatter | `runbooks/<name>.md` in this repo |
-| Operation | YAML | `operations/<name>.yaml` in this repo |
+| Runbook | Markdown with YAML frontmatter | `helm/incident-operator/files/runbooks/<name>.md` |
+| Operation | YAML | `helm/incident-operator/files/operations/<name>.yaml` |
 | Incident, sessions, operation runs, approvals | Postgres rows | `incident_operator` DB on the plain `postgres` instance |
 
 ### 4.1 Runbook
@@ -114,10 +114,37 @@ If the node has D-state mount.nfs older than 10 minutes and Tower looks healthy,
 Never suggest probing with a new mount from a k8s node.
 ```
 
-The body is a distillation of its `sourceDocs`, so a long incident write-up never goes into a prompt whole. The
-headings `## Investigation` and `## Remediation` are conventions: the investigation session (§6.1) gets the whole
+The headings `## Investigation` and `## Remediation` are conventions: the investigation session (§6.1) gets the whole
 body, and the remediation session (§6.3) gets `## Remediation` only. A runbook without those headings still works,
 and both sessions then get the whole body.
+
+**Runbooks are short.** They are written for a small local model with a few thousand tokens to work with, not for
+a person or a frontier model. The long write-ups in `docs/issues/` and the cluster-config docs stay where they are,
+as the source material. A runbook links to them with `sourceDocs:` and **is never allowed to include them**:
+`sourceDocs` is for humans and for whoever writes the runbook, and nothing in it reaches a prompt.
+
+| Limit | Value | On load |
+|---|---|---|
+| Whole body | 1,200 tokens ⬜ | over: rejected |
+| `## Remediation` section | 400 tokens ⬜ | over: rejected |
+| `description` | 60 tokens ⬜ | over: rejected |
+| Whole body | 800 tokens ⬜ | over: warning in the UI |
+
+Tokens are counted with the deployed model's tokenizer when it is known, otherwise as characters ÷ 4. With the
+precursors (§6.4), the first investigation prompt then stays near half of its 6k budget, which leaves room for
+requested results.
+
+How to write one:
+- **What it looks like:** the symptoms this alert means, in two to four lines. Include what it is *not*, if a
+  look-alike exists ("high load with busy CPU is a different problem").
+- **Investigation:** what to look at and what each result means, as short bullets. Name operations by their name.
+  No commands for a human to type: the model can't run them, and the operations already do.
+- **Remediation:** the decision, as a short if/then list, ending with what must go to a human.
+- **No history and no narrative.** Dates, timelines and root-cause stories stay in the write-up. A runbook keeps
+  only the conclusion ("deleting the node's CSI pod clears stuck mount.nfs; it does not fix a deadlocked Tower").
+- **No numbers the code already checks.** Thresholds in an operation's `pre` don't need repeating in prose.
+
+The §12 runbook, written out in full, is the reference example and should stay within the limits.
 
 ### 4.2 Operation
 
@@ -173,10 +200,25 @@ probe has run"). Safety conditions belong in `pre`. Neither is needed for most o
 
 ### 4.3 Files now, CRDs maybe later
 
-The operator loads `runbooks/` and `operations/` from this repo, through a git-sync sidecar or a ConfigMap built by
-the chart (⬜ decide in phase 2), and re-reads them on change. Each file is validated on load. An invalid file is
-rejected, the previous version stays live, and the error shows in the UI. Changing a field is an edit, not a schema
-version bump.
+**Loading: a ConfigMap built by the chart, deployed by Argo** (decided 2026-10-31). The chart renders
+`files/runbooks/` and `files/operations/` into ConfigMaps (`.Files.Glob`). Helm can only read files inside the
+chart folder, which is why they live there and not at the repo root. The operator watches those ConfigMaps through
+the API and re-validates on change, so a sync takes effect without a restart.
+
+Why not a git-sync sidecar:
+- The executor's RBAC is generated from the same `operations/` files at render time (§7.2). Through the chart, an
+  operation and the permissions it needs arrive in the same sync. With git-sync, a new operation would go live on
+  push while its RBAC waited for Argo, and it would fail with 403 in between. Runbooks go the same way so they
+  never refer to an operation that isn't deployed yet.
+- No deploy key for the private repo inside the cluster, and no extra sidecar to keep healthy.
+- The runbook revision recorded on an incident (§8.2) is the commit Argo deployed.
+
+The fast loop is local: the replay CLI (§9.3) runs stored incidents against the working-tree files, so prose and
+prompt changes are tested before anything is pushed. A ConfigMap holds at most 1 MiB, far more than short runbooks
+need (§4.1).
+
+Each file is validated on load (schema, operation references, size limits). An invalid file is rejected, the
+previous version stays live, and the error shows in the UI. Changing a field is an edit, not a schema version bump.
 
 Once the format stops changing, promoting it to CRDs (`Runbook`, `Operation`) is mechanical. Grouping runbooks into
 a "system under the umbrella" also waits until there are enough runbooks to know what a system is. Until then, a
@@ -474,6 +516,48 @@ from 14-day baselines):
 `nfs-dstate` is a precursor even though it touches the node, because without it neither the model nor the fix's
 pre-check knows anything useful. It doesn't mount anything, so it is safe to run on a wedged node.
 
+**The runbook** (`files/runbooks/nfs-client-wedge.md`), in full. It is the reference for §4.1's limits:
+
+```markdown
+---
+name: nfs-client-wedge
+description: >-
+  A worker's kernel NFS client to Tower is wedged: mount.nfs piles up in D state, load climbs with idle CPU,
+  pods mounting the share hang in ContainerCreating.
+match: {alertname: NodeLoadHighCPUIdle}
+priority: 100
+target: {kind: Node, from: instanceToNode}
+precursors: [node-load-cpu-6h, node-failedmount-events, nfs-dstate]
+operations: [nfs-dstate, node-kmsg-nfs, tower-load, {restart-csi-nfs-node: {autonomy: approve}}]
+sourceDocs:
+  - infra/cluster-config/docs/issues/2026_10_18_unraid_nfs_v41_client_wedge.md
+  - infra/cluster-config/docs/postgres_backup.md
+---
+
+## What this looks like
+Load rises steadily on one node while its CPU stays mostly idle. Pods on that node that mount the Tower NFS share
+sit in ContainerCreating with FailedMount timeouts. Not this runbook: high load with busy CPU.
+
+## Investigation
+- nfs-dstate: mount_nfs_dstate_total > 0 confirms a wedged client on this node. state_manager_dstate true means
+  the NFSv4 state manager itself is stuck.
+- node-load-cpu-6h: a steady climb over hours fits a wedge; a sudden spike fits something else.
+- tower-load: if Tower's load is also high, Tower's nfsd may be deadlocked, and the fix below will not hold.
+- node-kmsg-nfs: repeated "server not responding" lines point at Tower rather than this node.
+
+## Remediation
+- Stuck mount.nfs on this node and Tower looks normal: restart-csi-nfs-node. The stuck mounts are children of the
+  CSI pod and die with it.
+- Tower load also high, or other nodes affected: do not restart; escalate "check Tower's nfsd for D-state
+  threads (root on Tower)".
+- Stuck tasks remain after the restart: escalate "reboot the node".
+- Never suggest testing with a new NFS mount from a k8s node: it wedges that node too.
+```
+
+Measured with the characters ÷ 4 estimate: the body is 192 words, ~290 tokens; `## Remediation` is ~110 tokens; the
+`description` is ~40 tokens. All well inside the limits, so the limits leave room for runbooks about three times
+this size.
+
 **Suggest only, never operations:**
 - "Check Tower's nfsd for D-state threads." It needs root on Tower, which the cluster does not have.
 - "Reboot the worker if D-state NFS tasks remain."
@@ -489,8 +573,8 @@ After several approved runs where the post-check passed, raising it to `auto` is
   Domain `infra`, by purpose: operating the cluster. Secondary domain `ai`.
 - **Chart:** `helm/incident-operator/` in this repo (self-deploying, CONVENTIONS §6). Controller, executor and UI as
   three Deployments from one image. The executor's RBAC is generated from `operations/` (§7.2).
-- **Runbooks and operations:** `runbooks/` and `operations/` in this repo. It is private, so node names and cluster
-  specifics can stay here.
+- **Runbooks and operations:** `helm/incident-operator/files/{runbooks,operations}/`, rendered into ConfigMaps
+  (§4.3). The repo is private, so node names and cluster specifics can stay here.
 - **Alertmanager:** add a `webhook_configs` receiver to the `cluster-alerts` root config
   (`monitoring/manifests/cluster-alerts.yaml`) with `continue: true` next to email, so email is never affected.
 - **DB:** `incident_operator` on the plain `postgres` instance, with an init SQL in `infra/cluster-config/postgres/`
@@ -512,8 +596,6 @@ After several approved runs where the post-check passed, raising it to `auto` is
 
 - **Model:** Qwen3-VL-4B (already loaded, no swap) or a dedicated text model (Bonsai, Gemma 4 12B), via replay
   (§9.3). A llama.cpp adapter in gpu-scheduler would be its own piece of work.
-- **Loading runbooks:** a git-sync sidecar (edits apply on push) or a chart-built ConfigMap (edits apply on Argo
-  sync) (§4.3).
 - **Name:** `incident-operator` is a placeholder.
 - **Scraper failures:** scrape-job-manager already classifies run failures and emails on state changes. Does this
   operator take those over via alerts (`ScrapeJob*` are currently unmailed), or read scrape-job-manager's history
