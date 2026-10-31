@@ -41,7 +41,7 @@ In scope:
   autonomy (§7).
 - A two-session triage per incident (§6), run as gpu-scheduler text-generation jobs.
 - A small UI: incidents, evidence, analysis, approve/reject, "alerts without a runbook".
-- Replaying stored incidents against another model or prompt (§9.3).
+- Replaying stored incidents against another model or prompt (§9.5).
 
 Not in scope:
 - Free-form tool use or shell access for the model. It can only call operations its runbook lists.
@@ -213,7 +213,7 @@ Why not a git-sync sidecar:
 - No deploy key for the private repo inside the cluster, and no extra sidecar to keep healthy.
 - The runbook revision recorded on an incident (§8.2) is the commit Argo deployed.
 
-The fast loop is local: the replay CLI (§9.3) runs stored incidents against the working-tree files, so prose and
+The fast loop is local: the replay CLI (§9.5) runs stored incidents against the working-tree files, so prose and
 prompt changes are tested before anything is pushed. A ConfigMap holds at most 1 MiB, far more than short runbooks
 need (§4.1).
 
@@ -316,7 +316,7 @@ The runbook prose suggests an order, and a model may not follow it. That's accep
 - every mutating operation's `pre` runs in code at execution time, whatever the model did before;
 - rounds and tokens are bounded, so a wandering small model ends with low-confidence findings rather than a loop.
 
-Replay (§9.3) shows whether a given model wanders often enough to need tighter prompts or `requires`.
+Replay (§9.5) shows whether a given model wanders often enough to need tighter prompts or `requires`.
 
 ### 6.3 Remediation session
 
@@ -437,14 +437,58 @@ runbook it ran with. `model_turn.messages` stores exactly what the model saw, wh
 - **Experiments: any OpenAI-compatible endpoint** (e.g. LM Studio on the desktop) behind the same interface, so a
   model can be tried before gpu-scheduler has an adapter for it.
 
-### 9.2 Model choice (open)
+### 9.2 Model profiles: swapping is a config change
 
-Candidates from the user's tests: Bonsai 27B (Ternary Bonsai 2 recommended: `Q2_0` on stock llama.cpp ≥ b11556),
-Gemma 4 12B, Mistral 3 3B. gpu-scheduler already runs Qwen3-VL-4B for text-only jobs. That avoids a model swap,
+Nothing in the operator names a model. Every call goes through a **profile**:
+
+```yaml
+# helm values (models are config, not runbook content)
+models:
+  default: qwen3vl-4b
+  profiles:
+    qwen3vl-4b:  {backend: gpu-scheduler, model: qwen3vl,  contextTokens: 16384}
+    qwen3-8b:    {backend: gpu-scheduler, model: qwen3-8b, contextTokens: 16384}
+    gemma3-12b:  {backend: openai, baseUrl: http://<lmstudio-host>:1234/v1, model: "<lm studio id>",
+                  contextTokens: 8192, sampling: {temperature: 0}}
+    bonsai-27b:  {backend: openai, baseUrl: http://<llama.cpp host>:8080/v1, model: bonsai,
+                  contextTokens: 65536, reasoningEffort: medium}
+  shadow: [gemma3-12b]        # also run these on every incident, for comparison only (§9.3)
+```
+
+- **Backends:** `gpu-scheduler` (any of its text adapters) or `openai` (any OpenAI-compatible server: LM Studio,
+  llama.cpp `llama-server`, vLLM). A model that doesn't have a gpu-scheduler adapter yet can still be tried through
+  `openai`.
+- **`contextTokens`** sets that profile's budgets (§6.4) as a fraction of its window. A larger-context model like
+  Bonsai gets more room for precursors and requested results without changing any runbook.
+- **Per-runbook override** (`model: gemma3-12b` in the frontmatter) for a runbook that does better on one model.
+- **Prompts** are part of the profile's prompt set, versioned, with one default set shared by all profiles. A model
+  that needs a different phrasing gets its own variant without affecting the others.
+
+### 9.3 Comparing models
+
+- **Shadow runs:** profiles listed in `shadow` run the same incident. They see the same precursors, and requested
+  operations are answered from what the primary run stored or are run read-only. Their output is stored and shown
+  next to the primary's on the incident page. Only the primary's remediation can propose an operation.
+- **Rating:** on the incident page, each profile's findings and suggestion get a 👍/👎 and an optional note. That's
+  the score that decides the default model, gathered from real incidents.
+- **Replay** (below) does the same offline over past incidents.
+
+Shadow runs cost GPU time and, on gpu-scheduler, model swaps. Keep the shadow list short and turn it off once a
+default is settled.
+
+### 9.4 Model choice (open)
+
+Candidates from the user's LM Studio tests: Gemma 3 12B (best overall with the triage prompt, by the user's
+judgement), Mistral 3 3B, and Bonsai 27B (Ternary Bonsai 2 recommended: `Q2_0` on stock llama.cpp ≥ b11556). Bonsai
+has the largest usable context but read worse. Measured 2026-10-31 on the RTX 5080 with 11 real failures (10
+scraper runs from scrape-job-manager history, one OOMKilled pod), using the user's prompt: Qwen3-VL-4B took 9.9
+s/case at batch 4 and 10.8 GB peak VRAM, and hit the 700-token cap on 8 of 11 answers. Qwen3-8B NF4 took 14.3 s/case
+at 8.8 GB, capped 1 of 11. Both located every failure. Both guessed what exit codes 65 and 75 mean (wrongly), and
+both gave generic advice (`docker ps`, `nslookup` from "the host"). That is missing context, not a weak model. gpu-scheduler already runs Qwen3-VL-4B for text-only jobs. That avoids a model swap,
 which takes ~23 s for qwen3vl. Bonsai and other GGUF models would need a llama.cpp-backed adapter in gpu-scheduler,
-which doesn't exist yet. The choice is made by replay (§9.3), not up front.
+which doesn't exist yet. The choice is made by replay (§9.5), not up front.
 
-### 9.3 Replay and evaluation
+### 9.5 Replay and evaluation
 
 `incident-operator replay --since 2026-11-01 --model X --session investigation` re-runs stored conversations against
 another model or prompt. Operation results come from the stored `op_result` rows, never re-run against the live
@@ -594,8 +638,8 @@ After several approved runs where the post-check passed, raising it to `auto` is
 
 ## 15. Open questions
 
-- **Model:** Qwen3-VL-4B (already loaded, no swap) or a dedicated text model (Bonsai, Gemma 4 12B), via replay
-  (§9.3). A llama.cpp adapter in gpu-scheduler would be its own piece of work.
+- **Model:** Qwen3-VL-4B (already loaded, no swap) or a dedicated text model (Gemma 3 12B, Mistral 3 3B, Bonsai),
+  via shadow runs and replay (§9.3, §9.5). A llama.cpp adapter in gpu-scheduler would be its own piece of work.
 - **Name:** `incident-operator` is a placeholder.
 - **Scraper failures:** scrape-job-manager already classifies run failures and emails on state changes. Does this
   operator take those over via alerts (`ScrapeJob*` are currently unmailed), or read scrape-job-manager's history
