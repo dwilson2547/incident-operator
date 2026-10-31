@@ -495,6 +495,7 @@ answers, not a scored eval.
 | Qwen3-VL-4B | n/a | 10 | Wordy (8/11 hit a 700-token cap). 10.8 GB at batch 4 |
 | Ministral 3 3B | 35k | 3–6 | Fastest, invents the most. At 150k context the first case took 76 s |
 | DeepSeek R1 0528 Qwen3 8B | 36k | 7.5–80 | Overthinks (one case 31k chars of thinking, then wrong) |
+| Gemma 4 26B A4B QAT (M2 Mac mini, MLX), with primer | 16k | 24–47 | Top-tier, concise answers; ~22 tok/s. Too big for the 3080; overflow / shadow candidate |
 
 Every model found the failing line in every case. They differed in what they **invented about this environment**:
 exit-code meanings, a webcache 404 read as an error, `docker ps` advice.
