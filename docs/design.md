@@ -3,14 +3,19 @@
 Status: **draft, 2026-10-31.** Nothing is built. Name and placement are provisional (§13).
 
 An in-cluster operator that turns firing alerts into tracked incidents, has a small local LLM triage each one
-against a runbook, suggests fixes, and runs narrowly scoped remediation actions you have approved in advance. It
-runs in stages: suggestions only at first, then runbooks once a failure recurs, then approved actions, then
+against a runbook, suggests fixes, and runs narrowly scoped remediation operations you have approved in advance. It
+runs in stages: suggestions only at first, then runbooks once a failure recurs, then approved operations, then
 automatic ones for fixes that have proven safe.
 
 The rule the whole design follows: **the model picks and explains; code decides what can run.** Matching an alert
-to a runbook, collecting evidence, choosing a target, checking preconditions, rate limiting and running an action
-are all deterministic code. The model reads, reasons and chooses among options the runbook allows. Nothing the
-model writes becomes a command, a target or a permission.
+to a runbook, choosing a target, checking preconditions, rate limiting and running an operation are all
+deterministic code. The model reads, reasons and chooses among operations the runbook allows. Nothing the model
+writes becomes a command, a target or a permission.
+
+The second rule: **be strict where there is power, loose everywhere else.** Operations (§4.2) are precise and
+versioned, because they act on the cluster. Runbooks (§4.1) are mostly prose the model reads, and they can be edited
+freely. Ordering, hints and "check X before Y" live in that prose, not in a state machine. Where an ordering really
+matters for safety, it is a precondition on the operation, checked in code whenever the operation is requested.
 
 ---
 
@@ -30,18 +35,20 @@ model writes becomes a command, a target or a permission.
 
 In scope:
 - Intake of Alertmanager alerts; incident records with dedup, timeline and outcome.
-- Runbooks: which alerts they match, what evidence to collect, the stage prompts, which actions are allowed.
-- A staged LLM pipeline per incident (§6), run as gpu-scheduler text-generation jobs.
-- Named remediation actions with preconditions, postconditions, rate limits and per-action autonomy (§7).
+- Runbooks: which alerts they match, the precursor data to collect, the operations allowed, and the prose the
+  model reads.
+- Operations: read-only checks and mutating fixes, with preconditions, postconditions, rate limits and per-operation
+  autonomy (§7).
+- A two-session triage per incident (§6), run as gpu-scheduler text-generation jobs.
 - A small UI: incidents, evidence, analysis, approve/reject, "alerts without a runbook".
 - Replaying stored incidents against another model or prompt (§9.3).
 
 Not in scope:
-- Free-form tool use or shell access for the model. The model can ask for more evidence only from queries its
-  runbook names (§6.1).
+- Free-form tool use or shell access for the model. It can only call operations its runbook lists.
 - Replacing Alertmanager's email. Email keeps working on its own, so an outage of this operator, the GPU or the
   ainode never silences alerts (§11).
 - Paging, on-call rotations, hosted LLMs (cost-free tooling only).
+- CRDs, for now (§4.3).
 
 ## 3. Build vs. buy
 
@@ -54,243 +61,299 @@ Not in scope:
 - It matches runbooks ("skills") by LLM description, not by alert. Its remediation add-on gets a broad ClusterRole
   plus arbitrary `kubectl` behind an approval step. Both are the opposite of this design.
 
-What we take from it: runbook bodies are markdown with a frontmatter `description`, close to its `SKILL.md`, so the
-same runbooks could be pointed at HolmesGPT later if a stronger model ever becomes available.
+What we take from it: runbooks are markdown with a frontmatter `description`, close to its `SKILL.md`, so the same
+runbooks could be pointed at HolmesGPT later if a stronger model ever becomes available.
 
 Building our own also follows the existing operator pattern in this workspace (scrape-job-manager: Python,
 `kubernetes` client, a pure reconcile tick, Postgres for history).
 
-## 4. Concepts
+## 4. Runbooks and operations
 
-| Thing | Where it lives | Why there |
+| Thing | Format | Where |
 |---|---|---|
-| `Runbook` | CRD, YAML in git, synced by Argo | Configuration, reviewed like code |
-| `Action` | CRD, YAML in git | Configuration that grants power. Every change goes through a commit |
-| `Probe` | CRD, YAML in git | Read-only evidence collector that needs host access (§5.3) |
-| Incident, stage runs, action runs, approvals | Postgres (`incident_operator` DB on the plain `postgres` instance) | History that grows without bound and needs querying, which etcd is bad at |
+| Runbook | Markdown with YAML frontmatter | `runbooks/<name>.md` in this repo |
+| Operation | YAML | `operations/<name>.yaml` in this repo |
+| Incident, sessions, operation runs, approvals | Postgres rows | `incident_operator` DB on the plain `postgres` instance |
 
-Autonomy levels (`suggest`, `approve`, `auto`) are a field on the `Action` and can be overridden per runbook. A
-level change is a git commit, never a button in the UI.
+### 4.1 Runbook
 
-### 4.1 `Runbook`
+The frontmatter is what code uses. The body is what the model reads.
 
-```yaml
-apiVersion: incidents.danwils.com/v1alpha1
-kind: Runbook
-metadata:
-  name: nfs-client-wedge
-spec:
-  description: >-            # human/LLM-readable; mirrors a SKILL.md description
-    A worker's kernel NFS client to Tower is wedged: mount.nfs piles up in D state, load climbs with idle CPU,
-    pods mounting the share hang in ContainerCreating.
-  match:                     # deterministic; first matching runbook by priority wins
-    alertname: NodeLoadHighCPUIdle
-    labels: {}               # optional extra label matchers (=, !=, =~)
-  priority: 100
-  target:                    # how the incident's target is derived. Never from model output
-    kind: Node
-    from: instanceToNode     # resolver: alert label `instance` (IP:port) -> Node by InternalIP (§5.4)
-  evidence: [...]            # §5
-  stages: [...]              # §6
-  actions:                   # the only actions any stage may propose for this runbook
-    - name: restart-csi-nfs-node
-      autonomy: approve      # overrides the Action's default for this runbook
-  body: |                    # the human runbook text, given to the model as reference
-    ...
+```markdown
+---
+name: nfs-client-wedge
+description: >-
+  A worker's kernel NFS client to Tower is wedged: mount.nfs piles up in D state, load climbs with idle CPU,
+  pods mounting the share hang in ContainerCreating.
+match:                       # deterministic; highest priority match wins
+  alertname: NodeLoadHighCPUIdle
+priority: 100
+target: {kind: Node, from: instanceToNode}   # §5.4; never from model output
+precursors:                  # read-only operations run automatically when the incident opens (§5)
+  - node-load-cpu-6h
+  - node-failedmount-events
+  - nfs-dstate
+operations:                  # everything the agent may request in this incident
+  - nfs-dstate
+  - node-kmsg-nfs
+  - tower-load
+  - restart-csi-nfs-node: {autonomy: approve}   # per-runbook override of the operation's default
+sourceDocs:
+  - infra/cluster-config/docs/issues/2026_10_18_unraid_nfs_v41_client_wedge.md
+  - infra/cluster-config/docs/postgres_backup.md
+---
+
+## What this looks like
+...
+
+## Investigation
+Check whether the stuck mount.nfs predate Tower's last reboot ...
+
+## Remediation
+If the node has D-state mount.nfs older than 10 minutes and Tower looks healthy, restart the node's CSI pod ...
+Never suggest probing with a new mount from a k8s node.
 ```
 
-Runbook YAML lives in this repo (`runbooks/`), not in `infra/cluster-config/playbooks/`. The existing playbooks and
-`docs/issues/` write-ups are the source material. A runbook links to its source with `sourceDocs:`, and its `body` is
-a distillation, so a long incident write-up never goes into a prompt whole.
+The body is a distillation of its `sourceDocs`, so a long incident write-up never goes into a prompt whole. The
+headings `## Investigation` and `## Remediation` are conventions: the investigation session (§6.1) gets the whole
+body, and the remediation session (§6.3) gets `## Remediation` only. A runbook without those headings still works,
+and both sessions then get the whole body.
 
-### 4.2 `Action`
+### 4.2 Operation
+
+One format for both read-only checks and mutating fixes:
 
 ```yaml
-apiVersion: incidents.danwils.com/v1alpha1
-kind: Action
-metadata:
-  name: restart-csi-nfs-node
-spec:
-  description: Delete the csi-nfs-node pod on one node; the DaemonSet recreates it.
-  autonomy: suggest                 # default; runbooks may raise it, only by commit
-  params:
-    node: {from: target}            # only sources: target | alertLabel:<name> | evidence:<id>.<jsonpath>
-  pre:                              # all must pass right before running; each is a Probe or query
-    - probe: nfs-dstate
-      expect: "$.mount_nfs_dstate_older_than_10m > 0"
-  run:
-    kind: DeletePods                # built-in executor verbs (§7.2), no arbitrary commands
-    namespace: kube-system
-    selector: {app: csi-nfs-node}
-    fieldSelector: "spec.nodeName={node}"
-  post:                             # checked after `settle`; failure escalates the incident
-    settle: 120s
-    checks:
-      - probe: nfs-dstate
-        expect: "$.mount_nfs_dstate_total == 0"
-      - k8s: {kind: Pod, namespace: kube-system, selector: {app: csi-nfs-node},
-              fieldSelector: "spec.nodeName={node}", expect: Ready}
-  limits:
-    perTarget: 1/1h                 # second trigger within the window escalates instead of running
-    global: 3/24h
-  onPostFailure: escalate           # never retries itself
+name: restart-csi-nfs-node
+description: Delete the csi-nfs-node pod on one node; the DaemonSet recreates it.
+mutating: true
+autonomy: suggest                 # default; runbooks may raise it, only by commit
+params:
+  node: {from: target}            # only sources: target | alertLabel:<name> | result:<operation>.<jsonpath>
+requires: [nfs-dstate]            # optional: these must have run in this incident (rarely needed)
+pre:                              # checked in code, against fresh results, right before running
+  - op: nfs-dstate
+    expect: "$.mount_nfs_dstate_older_than_10m > 0"
+run:
+  verb: DeletePods                # built-in executor verbs (§7.2); never an arbitrary command
+  namespace: kube-system
+  selector: {app: csi-nfs-node}
+  fieldSelector: "spec.nodeName={node}"
+post:                             # after `settle`; failure escalates the incident
+  settle: 120s
+  checks:
+    - op: nfs-dstate
+      expect: "$.mount_nfs_dstate_total == 0"
+    - k8s: {kind: Pod, namespace: kube-system, selector: {app: csi-nfs-node},
+            fieldSelector: "spec.nodeName={node}", expect: Ready}
+limits: {perTarget: 1/1h, global: 3/24h}   # over the limit = escalate instead of running
 ```
 
-### 4.3 `Probe`
+A read-only operation is the same shape with `mutating: false`, a `run` of a query kind (§5.1), and usually no
+`pre`, `post` or `limits`:
 
-A `Probe` is a read-only collector that runs as a short Job on a specific node when evidence needs the host, for
-example "which processes are in D state". It is defined, reviewed and permissioned like an `Action`, but it cannot
-change anything (§7.3). Its output is JSON on stdout.
+```yaml
+name: node-load-cpu-6h
+description: Load averages and CPU busy fraction for the node over the last 6 hours, 10-minute steps.
+mutating: false
+params: {instance: {from: alertLabel:instance}}
+run:
+  kind: promql-range
+  queries:
+    load1: 'node_load1{instance="{instance}"}'
+    load15: 'node_load15{instance="{instance}"}'
+    cpu_busy: '1 - avg(rate(node_cpu_seconds_total{instance="{instance}",mode="idle"}[10m]))'
+  range: 6h
+  step: 10m
+budget: {maxBytes: 4000}
+```
 
-## 5. Evidence
+`requires` covers the rare case where an ordering matters for more than safety ("only offer this fix once that
+probe has run"). Safety conditions belong in `pre`. Neither is needed for most operations.
 
-### 5.1 Sources
+### 4.3 Files now, CRDs maybe later
 
-A runbook lists evidence items. The operator collects them **before** any model call, deterministically, and stores
-each result on the incident.
+The operator loads `runbooks/` and `operations/` from this repo, through a git-sync sidecar or a ConfigMap built by
+the chart (⬜ decide in phase 2), and re-reads them on change. Each file is validated on load. An invalid file is
+rejected, the previous version stays live, and the error shows in the UI. Changing a field is an edit, not a schema
+version bump.
+
+Once the format stops changing, promoting it to CRDs (`Runbook`, `Operation`) is mechanical. Grouping runbooks into
+a "system under the umbrella" also waits until there are enough runbooks to know what a system is. Until then, a
+runbook's `match` defines what is covered.
+
+## 5. Precursors and on-demand checks
+
+When an incident opens, the operator runs the runbook's **precursors**, deterministically and before any model
+call, and puts their results in the first prompt. This is the data the runbook author knows is always needed for
+this alert.
+
+Every other read-only operation on the runbook's list is **on demand**. It runs only when the agent asks for it
+during investigation (§6.1), so expensive or node-touching checks run only when the case needs them.
+
+Mutating operations are never precursors.
+
+### 5.1 Read-only operation kinds
 
 | `kind` | What | Notes |
 |---|---|---|
-| `promql` | Instant or range query against `prometheus-kube-prometheus-prometheus.monitoring:9090` | Range results are downsampled to at most N points (§6.3) |
-| `logql` | Loki via `loki-gateway.monitoring` | Line count and byte caps; newest first |
-| `k8s.events` | Events for the target (or objects named by alert labels) | Last N, deduplicated by reason |
-| `k8s.describe` | A structured summary of one object (status, conditions, recent events). Not raw `kubectl describe` | |
-| `k8s.logs` | Last N lines of a container | Byte-capped |
-| `probe` | A `Probe` run on the target node | §4.3 |
-| `alert` | The alert's labels and annotations | Always included |
+| `promql` / `promql-range` | Queries against `prometheus-kube-prometheus-prometheus.monitoring:9090` | Range results downsampled to at most N points |
+| `logql` | Loki via `loki-gateway.monitoring` | Line and byte caps; newest first |
+| `k8s-events` | Events for the target, or for objects named by alert labels | Last N, deduplicated by reason |
+| `k8s-summary` | A structured summary of one object (status, conditions, recent events). Not raw `kubectl describe` | |
+| `k8s-logs` | Last N lines of a container | Byte-capped |
+| `probe` | A short Job on the target node that reads `/proc` and prints JSON (§5.3) | |
 
-Parameters can only reference the target, alert labels and earlier evidence. The model never supplies them.
+The alert's own labels and annotations are always included and need no operation.
 
 ### 5.2 Size discipline
 
-Every item has a byte cap and a summariser (for example top-k series, last N lines, or a count by reason). The total
-evidence block for a stage has a token budget (§6.3). An item that is over its cap is truncated, and the truncation
-is noted to the model, never silently dropped.
+Every operation has a byte budget and a summariser (for example top-k series, last N lines, or a count by reason).
+The precursor block as a whole has a token budget (§6.4). An oversized result is truncated, and the truncation is
+noted to the model, never silently dropped.
 
 ### 5.3 Probes on nodes
 
 The NFS write-up's first rule: **never probe a suspect NFS server with a new mount from a k8s node.** A new mount
 reuses the wedged client and wedges that node too. Probes therefore:
 - mount no volumes beyond `/proc` (via `hostPID: true`) and a tmpfs;
-- run with a read-only root filesystem, no host network, and drop every capability except the ones the probe
-  declares (reading other processes' `/proc/<pid>/stack` needs `CAP_SYS_PTRACE` ⚠ unverified for this kernel);
-- have a hard `activeDeadlineSeconds`. A probe that hangs fails the stage instead of blocking it.
+- run with a read-only root filesystem, no host network, no service-account token, and only the capabilities the
+  probe declares (reading other processes' `/proc/<pid>/stack` needs `CAP_SYS_PTRACE` ⚠ unverified for this kernel);
+- have a hard `activeDeadlineSeconds`, so a probe that hangs fails instead of blocking the incident.
 
 ### 5.4 Target resolution
 
 node-exporter alerts carry `instance="192.168.0.36:9100"`, with no node name (verified 2026-10-31 on
 `node_procs_blocked`). The `instanceToNode` resolver maps the IP to the Node whose `InternalIP` matches. Tower
-(`instance="tower"`, job `tower-node`) resolves to no Node, so node-targeted actions are impossible for it by
+(`instance="tower"`, job `tower-node`) resolves to no Node, so node-targeted operations are impossible for it by
 construction.
 
-## 6. The stage pipeline
-
-Each stage is **one fresh model call**: its own system prompt, only the inputs it declares, and a JSON output with a
-fixed shape that is validated before the next stage sees it. Code runs between stages. A runbook declares its stages.
-An incident with no runbook gets the default single stage (§6.4).
+## 6. Triage: two sessions
 
 ```
-alert ─▶ match runbook ─▶ collect evidence ─▶ [investigate ⇄ more evidence]* ─▶ findings ─▶ remediate ─▶ report
-                                               (bounded rounds)                   (structured)  (no raw logs)
+alert ─▶ match runbook ─▶ precursors ─▶ INVESTIGATION SESSION ─────────────▶ findings ─▶ REMEDIATION SESSION ─▶ report
+                                       (loop: request read-only ops, budgeted)  (fixed JSON)  (no raw evidence)
 ```
 
-### 6.1 `investigate`
+Each model call is greedy and returns JSON that is validated before code acts on it. The two sessions share no
+conversation. The only thing passed from one to the other is the findings object.
 
-- **In:** runbook `description` + `body`, the alert, the evidence block, and the menu of extra evidence the runbook
-  offers (`evidence.optional[]`, by id and description).
-- **Out:**
+### 6.1 Investigation session
+
+A loop of model calls, with a growing conversation:
+
+- **First turn in:** the runbook's full body, the alert, the precursor results, and the menu of on-demand read-only
+  operations (name and description only).
+- **Each turn out:** either
   ```json
-  {"need_more": ["dmesg-nfs"], "notes": "...", "done": false}
+  {"request": ["node-kmsg-nfs"], "reason": "..."}
   ```
-  or `{"done": true, "notes": "..."}`.
-- Code collects any requested optional items and calls `investigate` again, up to `maxRounds` (default 2 ⬜). Ids
-  that aren't on the menu are ignored and recorded.
-
-### 6.2 `findings`
-
-- **In:** the investigate notes, plus the evidence.
-- **Out:**
+  or
   ```json
-  {"what_failed": "...", "where": {"kind": "Node", "name": "..."}, "evidence_refs": ["nfs-dstate", "load"],
-   "confidence": "low|medium|high", "matches_runbook": true, "summary": "..."}
+  {"done": true, "findings": {...}}
   ```
-- `where` is checked against the derived target. A mismatch is recorded and shown, and the action stage still uses
-  the derived target.
-- This is the hand-off point. Everything after it sees only these fields, not the raw evidence.
+- Code runs any requested operations that are on the menu and appends their results as the next turn. Names not on
+  the menu are ignored, recorded, and reported back to the model as unavailable.
+- Bounds: `maxRounds` (default 3 ⬜) and a token budget for the whole conversation (§6.4). At either limit, the next
+  turn tells the model it must finish now.
 
-### 6.3 `remediate`
+**Findings** (fixed shape, the hand-off):
 
-- **In:** the findings, the runbook's remediation section, and the allowed actions with their descriptions and
-  effective autonomy. **No raw evidence, no log lines.**
+```json
+{"what_failed": "...", "where": {"kind": "Node", "name": "..."}, "evidence_refs": ["nfs-dstate", "node-load-cpu-6h"],
+ "confidence": "low|medium|high", "matches_runbook": true, "summary": "..."}
+```
+
+`where` is checked against the derived target. A mismatch is recorded and shown, and any operation still uses the
+derived target.
+
+### 6.2 Why the model can choose the order
+
+The runbook prose suggests an order, and a model may not follow it. That's acceptable because:
+- read-only operations can't change anything;
+- every mutating operation's `pre` runs in code at execution time, whatever the model did before;
+- rounds and tokens are bounded, so a wandering small model ends with low-confidence findings rather than a loop.
+
+Replay (§9.3) shows whether a given model wanders often enough to need tighter prompts or `requires`.
+
+### 6.3 Remediation session
+
+A single call:
+
+- **In:** the findings, the runbook's `## Remediation` section, and the allowed mutating operations with their
+  descriptions and effective autonomy. **No raw evidence and no log lines.**
 - **Out:**
   ```json
-  {"suggestion": "...", "action": "restart-csi-nfs-node" | null, "why": "...",
+  {"suggestion": "...", "operation": "restart-csi-nfs-node" | null, "why": "...",
    "escalate_to_human": "e.g. check Tower's nfsd for D-state threads (needs root on Tower)"}
   ```
-- `action` must be on the runbook's list. Anything else becomes null and is recorded. Parameters are not part of
-  the output, because they come from the `Action`'s `params` (§4.2).
+- `operation` must be a mutating operation on the runbook's list. Anything else becomes null and is recorded.
+  Parameters are not part of the output, because they come from the operation's `params` (§4.2).
 
-Budgets: each stage has `maxInputTokens` (default 6k ⬜) and `maxNewTokens` (default 512, gpu-scheduler's
-`DEFAULT_MAX_NEW_TOKENS`). gpu-scheduler's text path rejects inputs over 60,000 characters (`MAX_INPUT_CHARS` in
-`models/textgen.py`), which is the hard ceiling.
+### 6.4 Budgets
 
-### 6.4 Default stage (no runbook)
+Per session: `maxInputTokens` (default 6k ⬜ for investigation, including precursors; 2k ⬜ for remediation) and
+`maxNewTokens` (default 512, gpu-scheduler's `DEFAULT_MAX_NEW_TOKENS`). gpu-scheduler's text path rejects inputs
+over 60,000 characters (`MAX_INPUT_CHARS` in `models/textgen.py`), which is the hard ceiling.
+
+### 6.5 No runbook
 
 A single call with the user's tested system prompt ("You are a triage agent, users will provide you with stack
 traces, error logs, or grafana metrics and your job is to identify where the failure happened and advise the user"),
-the alert, and generic evidence: events and logs for the objects named in the alert's labels. The output is a
+the alert, and generic precursors: events and logs for the objects named in the alert's labels. The output is a
 suggestion only. The incident is flagged **needs runbook** (§8).
 
-### 6.5 Untrusted text
+### 6.6 Untrusted text
 
 Log lines, events and alert annotations can contain text that someone else controls. Scraper errors include
 content from third-party pages. Defences, in order:
-1. Only `investigate` sees raw evidence, and it can only request menu items (§6.1).
-2. `findings` has a fixed shape. `remediate` never sees raw text.
-3. Actions come only from the runbook's list. Parameters come only from the target and alert labels. Preconditions
-   run in code against fresh probes.
+1. Only the investigation session sees raw evidence, and it can only request read-only operations from its menu.
+2. Findings have a fixed shape. The remediation session never sees raw text.
+3. Mutating operations come only from the runbook's list. Parameters come only from the target, alert labels and
+   operation results. Preconditions run in code against fresh results.
 
-So a model fooled by injected text can at most suggest an action the runbook already allows, on the host that is
+So a model fooled by injected text can at most suggest an operation the runbook already allows, on the host that is
 alerting, and only if that host passes the precondition at that moment.
 
-## 7. Actions
+## 7. Mutating operations
 
 ### 7.1 Autonomy
 
-| Level | What happens when `remediate` proposes it |
+| Level | What happens when the remediation session proposes it |
 |---|---|
 | `suggest` | Shown on the incident. A human runs the fix (the UI shows the exact `kubectl` equivalent) |
 | `approve` | One click in the UI runs it through the executor. Pre-checks run at click time, not proposal time |
 | `auto` | The executor runs it when proposed, if pre-checks pass and limits allow |
 
-How an action moves up a level (a convention, not enforced): `suggest` → `approve` once the fix is confirmed
-correct, then `approve` → `auto` after several approved runs with passing post-checks. The UI shows each action's
-record (runs, post-check pass rate, last failure) to support that decision. Moving up is a commit to the
-`Action`/`Runbook`.
+How an operation moves up a level (a convention, not enforced): `suggest` → `approve` once the fix is confirmed
+correct, then `approve` → `auto` after several approved runs with passing post-checks. The UI shows each
+operation's record (runs, post-check pass rate, last failure) to support that decision. Moving up is a commit to
+the operation or the runbook.
 
 ### 7.2 Executor
 
-A separate Deployment from the controller, with its own ServiceAccount. It reads approved action runs from Postgres
-and performs them with a **small fixed set of verbs**:
+A separate Deployment from the controller, with its own ServiceAccount. It reads approved operation runs from
+Postgres and performs them with a **small fixed set of verbs**:
 
 | Verb | Does | RBAC it needs |
 |---|---|---|
 | `DeletePods` | Delete pods matching namespace + selector + fieldSelector | `delete` on `pods` in the namespaces listed in its config |
 | `RolloutRestart` | Patch a Deployment/StatefulSet's restart annotation | `patch` on named workloads |
 | `CreateJobFrom` | `create job --from=cronjob/<name>` (rerun a failed backup) | `create` on `jobs` + `get` on `cronjobs`, named namespaces |
-| `RunJob` | Run a vetted Job template from the `Action` (e.g. a node-local kill script) | `create` on `jobs` in the operator namespace |
+| `RunJob` | Run a vetted Job template from the operation (e.g. a node-local kill script) | `create` on `jobs` in the operator namespace |
 
-The verb set grows by code change. The executor's Role/ClusterRole is generated from the `Action`s in git, so its
-RBAC is exactly the union of what the committed actions need. A node-local script such as "kill stale mount
-helpers" is a `RunJob` with a pinned image and a fixed command. Only its parameters (from §4.2's sources) vary.
+The verb set grows by code change. The chart generates the executor's Role/ClusterRole from the mutating operations
+in `operations/`, so its RBAC is exactly the union of what the committed operations need. A node-local script such
+as "kill stale mount helpers" is a `RunJob` with a pinned image and a fixed command. Only its parameters (from
+§4.2's sources) vary.
 
 ### 7.3 Permissions summary
 
 | Component | Can |
 |---|---|
-| Controller | Read CRDs, read the k8s objects evidence needs, create Probe Jobs, read/write its DB, submit gpu-scheduler jobs. No delete/patch on workloads |
+| Controller | Load runbooks and operations, read the k8s objects read-only operations need, create probe Jobs, read/write its DB, submit gpu-scheduler jobs. No delete/patch on workloads |
 | Executor | Only what §7.2 generates. No access to gpu-scheduler |
-| Probe Jobs | Read `/proc` on one node. No cluster API token (`automountServiceAccountToken: false`) |
+| Probe Jobs | Read `/proc` on one node. No cluster API token |
 | Model | Nothing. It is a remote text-in/JSON-out service |
 
 ## 8. Incidents
@@ -302,22 +365,24 @@ helpers" is a `RunJob` with a pinned image and a fixed command. Only its paramet
 - **Dedup:** one open incident per Alertmanager fingerprint. Re-sends update `last_seen`. A resolved alert marks
   the incident `alert_resolved`. Closing it is separate (a human, or a passing post-check).
 - **Grouping:** alerts that resolve to the same target and runbook within a window attach to one incident.
-- **Needs runbook:** incidents with no matching runbook appear in their own list, with the default stage's guess
+- **Needs runbook:** incidents with no matching runbook appear in their own list, with the default triage's guess
   and a count of how often that alertname has fired. That list is the to-do list for writing runbooks.
 
 ### 8.2 Schema (Postgres, sketch)
 
 ```
-incident(id, fingerprint, alertname, labels jsonb, target_kind, target_name, runbook, status,
+incident(id, fingerprint, alertname, labels jsonb, target_kind, target_name, runbook, runbook_rev, status,
          first_seen, last_seen, resolved_at, summary)
-stage_run(id, incident_id, stage, round, model, prompt_version, input jsonb, output jsonb, raw_text,
-          gpu_job_id, input_tokens, output_tokens, started_at, finished_at, error)
-evidence(id, incident_id, item_id, kind, query, result jsonb, truncated bool, collected_at)
-action_run(id, incident_id, action, params jsonb, autonomy, proposed_by_stage, approved_by, approved_at,
-           pre_result jsonb, run_result jsonb, post_result jsonb, status, started_at, finished_at)
+op_result(id, incident_id, operation, op_rev, trigger,          -- trigger: precursor | requested | pre | post
+          params jsonb, result jsonb, truncated bool, collected_at, error)
+model_turn(id, incident_id, session, turn, model, prompt_version, messages jsonb, output jsonb, raw_text,
+           gpu_job_id, input_tokens, output_tokens, started_at, finished_at, error)
+op_run(id, incident_id, operation, op_rev, params jsonb, autonomy, proposed_by_turn, approved_by, approved_at,
+       status, started_at, finished_at, error)                  -- its pre/post results are op_result rows
 ```
 
-`stage_run.input` stores exactly what the model saw, which is what makes replay possible (§9.3).
+`runbook_rev` and `op_rev` are the git revisions that were live, so an incident can be read against the exact
+runbook it ran with. `model_turn.messages` stores exactly what the model saw, which is what makes replay possible.
 
 ## 9. The model
 
@@ -325,7 +390,8 @@ action_run(id, incident_id, action, params jsonb, autonomy, proposed_by_stage, a
 
 - **Default: gpu-scheduler** text generation (`POST /v1/jobs` with `{"messages", "json": true, "max_new_tokens"}`),
   with a `deadline_seconds` and a `callback_url`. Greedy decoding, so a replay is deterministic. Triage can wait
-  minutes, which suits the queue. The deadline keeps it from starving behind a caption backfill.
+  minutes, which suits the queue. The deadline keeps it from starving behind a caption backfill. An investigation
+  of N rounds is N sequential jobs.
 - **Experiments: any OpenAI-compatible endpoint** (e.g. LM Studio on the desktop) behind the same interface, so a
   model can be tried before gpu-scheduler has an adapter for it.
 
@@ -338,17 +404,21 @@ which doesn't exist yet. The choice is made by replay (§9.3), not up front.
 
 ### 9.3 Replay and evaluation
 
-`incident-operator replay --since 2026-11-01 --model X --stage findings` re-runs stored stage inputs against another
-model or prompt and diffs the structured outputs. After a few weeks of real incidents, that gives the same kind of
-bake-off as the photo-dump search and gyopart suggester tests: real cases, scored stage by stage. Prompts carry a
-version (`prompt_version`), like qwen3vl's caption prompts.
+`incident-operator replay --since 2026-11-01 --model X --session investigation` re-runs stored conversations against
+another model or prompt. Operation results come from the stored `op_result` rows, never re-run against the live
+cluster. It then diffs the structured outputs: which operations were requested, the findings, and the proposed
+fix. After a few weeks of real incidents, that gives the same kind of bake-off as the photo-dump search and gyopart
+suggester tests: real cases, scored session by session. A replay can only request operations whose results were
+stored, which limits how far a different model can explore. Prompts carry a version (`prompt_version`), like
+qwen3vl's caption prompts.
 
 ## 10. UI and notifications
 
 - **Incidents list:** open, needs-runbook, recently resolved.
-- **Incident page:** alert, evidence (collapsible), each stage's output, the proposed action, its pre-check preview
-  and an Approve/Reject button, then action and post-check results.
-- **Actions page:** each action's record (§7.1).
+- **Incident page:** alert, precursors and requested results (collapsible), the investigation turns, findings, the
+  proposed fix, a pre-check preview with an Approve/Reject button, then operation and post-check results.
+- **Operations page:** each operation's record (§7.1). **Runbooks page:** loaded runbooks, load errors, and how
+  often each has matched.
 - **Auth:** authentik OIDC gated by a group, following gpu-scheduler's dashboard pattern (`oidc.py`). LAN-only first.
 - **Notifications:** one email per incident when analysis finishes or approval is needed (SMTP as in
   `alerting.md`), in addition to Alertmanager's own email, not instead of it.
@@ -358,10 +428,11 @@ version (`prompt_version`), like qwen3vl's caption prompts.
 | Failure | Effect | Mitigation |
 |---|---|---|
 | Operator down | No triage | Alertmanager email is independent. Its webhook receiver retries, and the controller reconciles from Alertmanager's API on start |
-| GPU busy / ainode down | Stages wait for their deadline | Incident shows "analysis unavailable" with the collected evidence. Alerts about the ainode itself are expected to hit this |
-| Model returns invalid JSON | Stage fails | One retry with the validation error appended, then `escalated` |
-| Probe hangs (e.g. NFS) | Stage blocks | `activeDeadlineSeconds`. Probes never mount the suspect share (§5.3) |
-| Action makes it worse | Post-check fails | `escalate`, no retry. `limits` stop loops |
+| GPU busy / ainode down | Sessions wait for their deadline | Incident shows "analysis unavailable" with the precursor results. Alerts about the ainode itself are expected to hit this |
+| Model returns invalid JSON | Turn fails | One retry with the validation error appended, then `escalated` |
+| Probe hangs (e.g. NFS) | Operation fails at its deadline | `activeDeadlineSeconds`. Probes never mount the suspect share (§5.3) |
+| Bad runbook/operation file pushed | That file doesn't load | Previous version stays live. Load error shown in the UI (§4.3) |
+| Fix makes it worse | Post-check fails | `escalate`, no retry. `limits` stop loops |
 | Flapping alert | Many incidents | Fingerprint dedup and grouping (§8.1) |
 
 ## 12. Worked example: NFS client wedge on a worker
@@ -389,38 +460,37 @@ from 14-day baselines):
   labels: {severity: warning}
 ```
 
-**Probe `nfs-dstate`** (on the target node, `/proc` only, no mounts): counts tasks in D state whose `comm` is
-`mount.nfs`, with their start times and parent PIDs. It also reports whether any NFSv4 state manager thread
-(`*-manager`) is in D, which is the runbook's step-1 signal. Output:
-`{mount_nfs_dstate_total, mount_nfs_dstate_older_than_10m, oldest_start, parents_are_csi_nfs_node, state_manager_dstate}`.
+**Operations:**
 
-**Evidence:** the alert; `node_load1`, `node_load15` and CPU busy for the node over 6h; events on the node and on pods
-scheduled there with reason `FailedMount`; the probe; Tower's `node_load1` (job `tower-node`) as context.
-Optional: kernel log lines matching `nfs: server` from the node, which needs a probe reading `/dev/kmsg` ⚠ unverified.
+| Operation | Kind | Role in the runbook |
+|---|---|---|
+| `node-load-cpu-6h` | `promql-range` | precursor |
+| `node-failedmount-events` | `k8s-events`, reason `FailedMount` on pods scheduled to the node | precursor |
+| `nfs-dstate` | `probe`: counts `mount.nfs` in D state with start times and parents, and whether an NFSv4 state manager (`*-manager`) is in D. Output `{mount_nfs_dstate_total, mount_nfs_dstate_older_than_10m, oldest_start, parents_are_csi_nfs_node, state_manager_dstate}` | precursor, and the `pre`/`post` check of the fix |
+| `node-kmsg-nfs` | `probe`: kernel log lines matching `nfs: server` (reads `/dev/kmsg` ⚠ unverified) | on demand |
+| `tower-load` | `promql-range` on job `tower-node` | on demand |
+| `restart-csi-nfs-node` | mutating, `DeletePods` (§4.2) | the fix, at **`approve`** |
 
-**Stages:** `investigate` (one round), `findings`, `remediate`.
+`nfs-dstate` is a precursor even though it touches the node, because without it neither the model nor the fix's
+pre-check knows anything useful. It doesn't mount anything, so it is safe to run on a wedged node.
 
-**Actions:**
-- `restart-csi-nfs-node` (§4.2): **`approve`** to start. Pre-check: the probe shows D-state `mount.nfs` older than 10
-  minutes. Post-check: no D-state `mount.nfs` after 120s, and the new CSI pod Ready.
-- **Suggest only, never actions:**
-  - "Check Tower's nfsd for D-state threads." It needs root on Tower, which the cluster does not have.
-  - "Reboot the worker if D-state NFS tasks remain."
+**Suggest only, never operations:**
+- "Check Tower's nfsd for D-state threads." It needs root on Tower, which the cluster does not have.
+- "Reboot the worker if D-state NFS tasks remain."
 
-**Why it starts at `approve`, not `auto`:** if Tower's own nfsd is deadlocked (the 2026-10-18 failure), deleting the
-CSI pod clears the node, but the next mount wedges again. The post-check catches that, because D-state `mount.nfs`
-reappears. The action is still a needless cycle, and the incident should go straight to "check Tower". After
-several approved runs where the post-check passed, raising this action to `auto` is the user's call.
+**Why the fix starts at `approve`, not `auto`:** if Tower's own nfsd is deadlocked (the 2026-10-18 failure),
+deleting the CSI pod clears the node, but the next mount wedges again. The post-check catches that, because D-state
+`mount.nfs` reappears. The fix is still a needless cycle, and the incident should go straight to "check Tower".
+After several approved runs where the post-check passed, raising it to `auto` is the user's call.
 
 ## 13. Placement and deployment
 
-- **Project:** `infra/incident-operator` (domain `infra`, by purpose: operating the cluster; secondary domain `ai`).
-  A submodule with its own repo once one exists.
-- **Chart:** `helm/incident-operator/` in this repo (self-deploying, CONVENTIONS §6). CRDs in `crds/`. Controller,
-  executor and UI as three Deployments from one image.
-- **Runbooks, Actions and Probes:** YAML in this repo under `runbooks/`, `actions/` and `probes/`, synced by the same
-  Argo app. They contain node names and cluster specifics, so if this repo goes public, they move to a private repo
-  ⬜ (decide with the repo's visibility).
+- **Project:** `infra/incident-operator`, a private repo (dwilson2547/incident-operator) and workspace submodule.
+  Domain `infra`, by purpose: operating the cluster. Secondary domain `ai`.
+- **Chart:** `helm/incident-operator/` in this repo (self-deploying, CONVENTIONS §6). Controller, executor and UI as
+  three Deployments from one image. The executor's RBAC is generated from `operations/` (§7.2).
+- **Runbooks and operations:** `runbooks/` and `operations/` in this repo. It is private, so node names and cluster
+  specifics can stay here.
 - **Alertmanager:** add a `webhook_configs` receiver to the `cluster-alerts` root config
   (`monitoring/manifests/cluster-alerts.yaml`) with `continue: true` next to email, so email is never affected.
 - **DB:** `incident_operator` on the plain `postgres` instance, with an init SQL in `infra/cluster-config/postgres/`
@@ -429,23 +499,25 @@ several approved runs where the post-check passed, raising this action to `auto`
 
 ## 14. Phasing
 
-1. **Suggest-only triage.** Webhook intake, incidents, the default stage, needs-runbook list, minimal UI, email.
-   No CRDs yet: one hard-coded generic stage. Proves intake and model latency on real alerts.
-2. **Runbooks and evidence.** `Runbook` and `Probe` CRDs, evidence collection, the three-stage pipeline, replay.
-   First runbooks: NFS client wedge (§12), the scraper failure classes, `KubeJobFailed` for backups.
-3. **Approved actions.** `Action` CRD, executor with `DeletePods` and `CreateJobFrom`, generated RBAC, pre- and
-   post-checks, limits. First action: `restart-csi-nfs-node` at `approve`.
-4. **Auto** for actions with a record. More verbs as runbooks need them.
+1. **Suggest-only triage.** Webhook intake, incidents, the no-runbook triage (§6.5), needs-runbook list, minimal UI,
+   email. Proves intake and model latency on real alerts.
+2. **Runbooks, precursors and read-only operations.** File loading and validation, precursors, the investigation
+   loop, findings, the remediation session as suggestion only, probes, replay. First runbooks: NFS client wedge
+   (§12), the scraper failure classes, `KubeJobFailed` for backups.
+3. **Approved fixes.** Mutating operations, the executor with `DeletePods` and `CreateJobFrom`, generated RBAC, pre-
+   and post-checks, limits. First: `restart-csi-nfs-node` at `approve`.
+4. **Auto** for operations with a record. More verbs as runbooks need them. CRDs if the formats have settled (§4.3).
 
 ## 15. Open questions
 
 - **Model:** Qwen3-VL-4B (already loaded, no swap) or a dedicated text model (Bonsai, Gemma 4 12B), via replay
   (§9.3). A llama.cpp adapter in gpu-scheduler would be its own piece of work.
-- **Repo visibility** and where runbooks with cluster specifics live (§13).
+- **Loading runbooks:** a git-sync sidecar (edits apply on push) or a chart-built ConfigMap (edits apply on Argo
+  sync) (§4.3).
 - **Name:** `incident-operator` is a placeholder.
 - **Scraper failures:** scrape-job-manager already classifies run failures and emails on state changes. Does this
   operator take those over via alerts (`ScrapeJob*` are currently unmailed), or read scrape-job-manager's history
-  DB directly as an evidence source?
+  DB through a read-only operation?
 - **Grafana metrics as input** (from the original prompt): pasting a panel isn't an alert. Is there also a manual
   "triage this" entry point in the UI that takes pasted text, outside the incident flow?
 - **Defaults marked ⬜** (`maxRounds`, token budgets, alert thresholds) get set from the first weeks of data.
