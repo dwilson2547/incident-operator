@@ -476,17 +476,51 @@ models:
 Shadow runs cost GPU time and, on gpu-scheduler, model swaps. Keep the shadow list short and turn it off once a
 default is settled.
 
-### 9.4 Model choice (open)
+### 9.4 Model choice
 
-Candidates from the user's LM Studio tests: Gemma 4 12B (best overall with the triage prompt, by the user's
-judgement), Mistral 3 3B, and Bonsai 27B (Ternary Bonsai 2 recommended: `Q2_0` on stock llama.cpp ≥ b11556). Bonsai
-has the largest usable context but read worse. Measured 2026-10-31 on the RTX 5080 with 11 real failures (10
-scraper runs from scrape-job-manager history, one OOMKilled pod), using the user's prompt: Qwen3-VL-4B took 9.9
-s/case at batch 4 and 10.8 GB peak VRAM, and hit the 700-token cap on 8 of 11 answers. Qwen3-8B NF4 took 14.3 s/case
-at 8.8 GB, capped 1 of 11. Both located every failure. Both guessed what exit codes 65 and 75 mean (wrongly), and
-both gave generic advice (`docker ps`, `nslookup` from "the host"). That is missing context, not a weak model. gpu-scheduler already runs Qwen3-VL-4B for text-only jobs. That avoids a model swap,
-which takes ~23 s for qwen3vl. Bonsai and other GGUF models would need a llama.cpp-backed adapter in gpu-scheduler,
-which doesn't exist yet. The choice is made by replay (§9.5), not up front.
+**Bake-off, 2026-10-31.** Eleven real failures (10 scraper runs from scrape-job-manager history, one OOMKilled
+pod) with the user's triage system prompt. Qwen3-VL-4B and Qwen3-8B ran through gpu-scheduler's adapters on the RTX
+5080. Everything else ran in LM Studio on the same machine, sized to fit 12 GB. Rankings are a reading of the
+answers, not a scored eval.
+
+| Model | Context run | s/case | Notes |
+|---|---|---|---|
+| Qwen3.5 9B | 53k (90k fits in 10.7 GB, user-measured) | 6.5–16.5 | Gemma-level log reading, fewest invented facts, k8s-aware advice |
+| Gemma 4 12B | 26k (the most that fits ~11.5 GB) | 12–18 | Best log reading without a primer |
+| Qwen3.5 4B | 37k (~100k fits) | 5–14 | Close to both at a third of the size |
+| Nemotron 3 Nano 4B | 38k | 4–8 | Reads logs well, invents environment facts confidently ("65 is the standard Linux DNS error") |
+| Bonsai 27B | 30k | 22–73 | Careful, slow, one ordering slip |
+| Qwen3-8B (NF4) | n/a | 14 | OK. 8.8 GB |
+| Ministral 3 14B reasoning | 26k | 6–15 | Gave exit 65 a different made-up meaning per case. No visible reasoning returned |
+| Qwen3-VL-4B | n/a | 10 | Wordy (8/11 hit a 700-token cap). 10.8 GB at batch 4 |
+| Ministral 3 3B | 35k | 3–6 | Fastest, invents the most. At 150k context the first case took 76 s |
+| DeepSeek R1 0528 Qwen3 8B | 36k | 7.5–80 | Overthinks (one case 31k chars of thinking, then wrong) |
+
+Every model found the failing line in every case. They differed in what they **invented about this environment**:
+exit-code meanings, a webcache 404 read as an error, `docker ps` advice.
+
+**Environment primer.** A ~320-token block appended to the system prompt: node names, the scrape_contract exit
+codes, what the scrape-stack services are and what a webcache 404 means, and "say whether a retry could help".
+It removed nearly all of that:
+
+| | Without primer | With primer |
+|---|---|---|
+| Qwen3.5 9B | 6.5–16.5 s, 1.5–3k chars | **6.6–8.7 s**, 1.5–2k chars, every exit code from the contract, retry verdict every time |
+| Gemma 4 12B | 12–18 s, ~1–1.3k tokens | 8–16 s, 570–1,100 tokens (shortest answers) |
+| Qwen3.5 4B | 5–14 s, 1.3–6k chars thinking | as accurate as the 9B, but **6–31 s, up to 17.8k chars thinking** |
+
+The 4B's extra thinking came mostly from the primer's "name the exact place it failed" line on the OOM case,
+which has no file or line. Soften that line ("…if the log shows one") and/or set a per-profile thinking budget
+(§9.2).
+
+So the primer is part of the design, not a prompt tweak: a fixed, versioned block in every investigation prompt,
+kept in `files/primer.md` and loaded like runbooks (§4.3), with its own size limit (500 tokens ⬜). Runbooks then
+carry only what is specific to their alert.
+
+**Decision so far:** default **Qwen3.5 9B** (accurate, fastest with the primer, long context in ~10.7 GB), with
+Gemma 4 12B as the shadow profile, and Qwen3.5 4B as the candidate for parallel or cheap first-pass work. They are
+GGUF models, so they need a llama.cpp-backed adapter in gpu-scheduler (it doesn't exist yet), or run through the
+`openai` backend against a llama.cpp/LM Studio server until it does. Confirmed by shadow runs and replay (§9.3, §9.5).
 
 ### 9.5 Replay and evaluation
 
@@ -638,8 +672,7 @@ After several approved runs where the post-check passed, raising it to `auto` is
 
 ## 15. Open questions
 
-- **Model:** Qwen3-VL-4B (already loaded, no swap) or a dedicated text model (Gemma 4 12B, Mistral 3 3B, Bonsai),
-  via shadow runs and replay (§9.3, §9.5). A llama.cpp adapter in gpu-scheduler would be its own piece of work.
+- **Model:** Qwen3.5 9B leads after the 2026-10-31 bake-off (§9.4). Confirm with shadow runs on real incidents. A llama.cpp adapter in gpu-scheduler would be its own piece of work.
 - **Name:** `incident-operator` is a placeholder.
 - **Scraper failures:** scrape-job-manager already classifies run failures and emails on state changes. Does this
   operator take those over via alerts (`ScrapeJob*` are currently unmailed), or read scrape-job-manager's history
