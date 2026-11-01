@@ -259,7 +259,8 @@ metadata:
   name: incident-operator-executor
   labels: {{- toYaml $labels | nindent 4 }}
 spec:
-  replicas: 1
+  # Off until the image has the executor: an older image ignores the `executor` argument and starts a second controller.
+  replicas: {{ if .Values.executor.enabled }}1{{ else }}0{{ end }}
   strategy: {type: Recreate}
   selector:
     matchLabels: {app: incident-operator-executor}
