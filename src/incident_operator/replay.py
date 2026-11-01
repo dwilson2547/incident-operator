@@ -1,7 +1,7 @@
 """Replay (docs/design.md §9.5): re-run stored incidents against another model, or against edited runbooks and
 prompts, and print the outcome next to what happened at the time.
 
-    python -m incident_operator replay [--model M] [--runbooks DIR] [--operations DIR] ID [ID ...]
+    python -m incident_operator replay [--model M] [--runbooks DIR] [--operations DIR] [--live] ID [ID ...]
 
 Needs DATABASE_URL, GPU_SCHEDULER_URL and GPU_SCHEDULER_TOKEN (locally: port-forwards to the cluster's Postgres and
 gpu-scheduler). Runbooks and operations default to the working tree's chart files, so a runbook edit can be tried
@@ -10,6 +10,10 @@ before it is pushed.
 Operation results come from what was stored for the incident, never from the live cluster: the cluster has moved on,
 and replay must not depend on it. A check that wasn't run at the time is answered "not stored", which limits how far a
 different model can explore (the design accepts that). The primer is the working tree's too.
+
+--live runs the checks against the cluster as it is now instead (KUBE_API_URL, e.g. `kubectl proxy`, and
+PROMETHEUS_URL), for trying a changed operation on an incident whose objects still exist. Probes don't run in live
+replay: PROBE_NAMESPACE is left unset, so they answer with an error.
 """
 from __future__ import annotations
 
@@ -21,7 +25,8 @@ from pathlib import Path
 
 from . import db, investigate
 from .library import Library
-from .ops import Result
+from .evidence import K8s
+from .ops import Result, Runner
 from .triage import Config, GpuScheduler
 
 CHART = Path(__file__).resolve().parents[2] / "helm" / "incident-operator" / "files"
@@ -45,14 +50,24 @@ def _ask(gpu, messages, schema, cfg, timeout) -> tuple[dict | None, str, dict]:
     return res.get("json"), res.get("text", ""), job
 
 
-def replay_runbook(inc: dict, lib: Library, gpu: GpuScheduler, cfg: Config, timeout: float) -> dict:
+def replay_runbook(inc: dict, lib: Library, gpu: GpuScheduler, cfg: Config, timeout: float,
+                   runner: Runner | None = None) -> dict:
     rb = lib.match(inc["labels"])
     if rb is None:
         return {"error": "no runbook in the working tree matches this alert"}
     stored = {e["operation"]: Result(e["operation"], e["source"], e["content"], e["data"], e["truncated"], e["error"])
               for e in inc["evidence"] if e["operation"]}
-    missing = lambda n: Result(n, n, None, error="not stored for this incident (replay doesn't run checks)")
-    pre = [stored.get(n) or missing(n) for n in rb.precursors]
+    if runner is not None:                    # --live: what the checks say now, earlier results feeding later params
+        ran: dict[str, Result] = {}
+
+        def check(n):
+            if n not in ran:
+                ran[n] = runner.run(lib.operations[n], inc["target"], inc["labels"], ran)
+            return ran[n]
+    else:
+        def check(n):
+            return stored.get(n) or Result(n, n, None, error="not stored for this incident (replay doesn't run checks)")
+    pre = [check(n) for n in rb.precursors]
     menu, menu_txt = investigate.menu_text(rb, lib.operations)
     messages = investigate.first_messages(inc, rb, inc["target"], pre, menu_txt, cfg.primer())
     turns, findings, model = [], {}, None
@@ -67,7 +82,7 @@ def replay_runbook(inc: dict, lib: Library, gpu: GpuScheduler, cfg: Config, time
         if not asked or n >= investigate.MAX_ROUNDS:
             findings = out.get("findings") or {}
             break
-        results = [stored.get(a) or missing(a) for a in asked if a in menu]
+        results = [check(a) for a in asked if a in menu]
         messages = investigate.next_messages(messages, text, results, [a for a in asked if a not in menu],
                                              investigate.MAX_ROUNDS - 1 - n)
     advice, _, _ = _ask(gpu, investigate.remediation_messages(inc, rb, inc["target"], findings, cfg.primer()),
@@ -92,6 +107,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--operations", default=str(CHART / "operations"))
     ap.add_argument("--primer", default=str(CHART / "primer.md"))
     ap.add_argument("--timeout", type=float, default=900)
+    ap.add_argument("--live", action="store_true", help="run the checks against the cluster now (KUBE_API_URL)")
     a = ap.parse_args(argv)
     cfg = Config.from_env()
     cfg.primer_path, cfg.fallback = a.primer, []
@@ -103,6 +119,10 @@ def main(argv: list[str]) -> int:
     for path, err in lib.errors.items():
         print(f"! {path}: {err}")
     conn = db.connect(os.environ["DATABASE_URL"])
+    runner = None
+    if a.live:
+        os.environ.pop("PROBE_NAMESPACE", None)
+        runner = Runner(K8s(base=os.environ["KUBE_API_URL"]))
     for i in a.ids:
         inc = db.get_incident(conn, i)
         if inc is None:
@@ -112,7 +132,7 @@ def main(argv: list[str]) -> int:
                 "findings": inc["findings"], "advice": inc["advice"],
                 "analysis": None if inc["runbook"] else inc["analysis"]}
         try:
-            now = (replay_runbook(inc, lib, gpu, cfg, a.timeout) if lib.match(inc["labels"])
+            now = (replay_runbook(inc, lib, gpu, cfg, a.timeout, runner) if lib.match(inc["labels"])
                    else replay_triage(inc, gpu, cfg, a.timeout))
         except Exception as e:
             now = {"error": f"{type(e).__name__}: {e}"}

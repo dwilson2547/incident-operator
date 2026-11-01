@@ -1,5 +1,5 @@
 name: job-status
-description: The Job's conditions (failed, deadline exceeded), backoff limit and deadline, its events, and its newest pod with exit codes and log tail.
+description: The Job's conditions (failed, deadline exceeded), backoff limit and deadline, its events, every attempt (pod) with its exit state, and the first failed and newest attempts' status and log tails.
 mutating: false
 params:
   namespace: {from: target.namespace}
@@ -7,4 +7,4 @@ params:
 run:
   kind: k8s-summary
   object: {kind: Job, namespace: "{namespace}", name: "{job}"}
-budget: {maxChars: 7000}
+budget: {maxChars: 8000}

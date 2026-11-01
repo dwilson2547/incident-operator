@@ -142,7 +142,7 @@ def _state(s: dict | None) -> str:
     return " ".join(bits)
 
 
-def _pod(k8s: K8s, ns: str, name: str, container: str | None = None) -> list[Item]:
+def _pod(k8s: K8s, ns: str, name: str, container: str | None = None, log_chars: int = LOG_CHARS) -> list[Item]:
     p = k8s.get(f"/api/v1/namespaces/{ns}/pods/{name}")
     st = p.get("status", {})
     lines = [f"phase: {st.get('phase')}  node: {p['spec'].get('nodeName')}  started: {st.get('startTime')}"]
@@ -161,20 +161,20 @@ def _pod(k8s: K8s, ns: str, name: str, container: str | None = None) -> list[Ite
     items = [Item("pod", f"pod {ns}/{name}", text, cut), _events(k8s, ns, "Pod", name)]
     names = [container] if container else [c["name"] for c in p["spec"].get("containers", [])]
     for c in names[:2]:
-        items.append(_logs(k8s, ns, name, c, previous=False))
+        items.append(_logs(k8s, ns, name, c, previous=False, limit=log_chars))
         if c in restarted:
-            items.append(_logs(k8s, ns, name, c, previous=True))
+            items.append(_logs(k8s, ns, name, c, previous=True, limit=log_chars))
     return items
 
 
-def _logs(k8s: K8s, ns: str, pod: str, container: str, previous: bool) -> Item:
+def _logs(k8s: K8s, ns: str, pod: str, container: str, previous: bool, limit: int = LOG_CHARS) -> Item:
     source = f"logs {ns}/{pod} [{container}]" + (" (previous container)" if previous else "")
     try:
         text = k8s.get(f"/api/v1/namespaces/{ns}/pods/{pod}/log",
                        {"container": container, "tailLines": LOG_LINES, "previous": str(previous).lower()}, text=True)
     except Exception as e:
         return Item("logs", source, None, error=f"{type(e).__name__}: {e}"[:300])
-    text, cut = _cap(text.strip() or "(empty)", LOG_CHARS, tail=True)
+    text, cut = _cap(text.strip() or "(empty)", limit, tail=True)
     return Item("logs", source, text, cut)
 
 
@@ -187,10 +187,21 @@ def _job(k8s: K8s, ns: str, name: str) -> list[Item]:
     for c in st.get("conditions", []):
         lines.append(f"condition {c['type']}={c['status']} {c.get('reason', '')}: {c.get('message', '')}".rstrip(": "))
     items = [Item("job", f"job {ns}/{name}", _cap("\n".join(lines))[0]), _events(k8s, ns, "Job", name)]
-    pods = k8s.get(f"/api/v1/namespaces/{ns}/pods", {"labelSelector": f"job-name={name}"})["items"]
+    pods = sorted(k8s.get(f"/api/v1/namespaces/{ns}/pods", {"labelSelector": f"job-name={name}"})["items"],
+                  key=lambda p: p["metadata"].get("creationTimestamp", ""))
     if pods:
-        newest = max(pods, key=lambda p: p["metadata"].get("creationTimestamp", ""))
-        items += _pod(k8s, ns, newest["metadata"]["name"])
+        # Every attempt, oldest first: with a backoff limit the last attempt can fail differently because of what the
+        # first one left behind (2026-11-01: the first was OOMKilled, its retry tripped over the leftover lock).
+        attempts = [f"{p['metadata']['name']} created {p['metadata'].get('creationTimestamp')} "
+                    f"phase={p.get('status', {}).get('phase')}: "
+                    + "; ".join(f"{cs['name']} {_state(cs.get('state'))}"
+                                for cs in p.get("status", {}).get("containerStatuses", []))
+                    for p in pods]
+        items.append(Item("pod", f"attempts of job {ns}/{name}, oldest first", _cap("\n".join(attempts))[0]))
+        first_failed = next((p for p in pods if p.get("status", {}).get("phase") == "Failed"), None)
+        shown = ([first_failed] if first_failed is not None and first_failed is not pods[-1] else []) + [pods[-1]]
+        for p in shown:                               # two pods share what one would get, so the op's budget holds both
+            items += _pod(k8s, ns, p["metadata"]["name"], log_chars=LOG_CHARS // len(shown))
     else:
         items.append(Item("pod", f"pods of job {ns}/{name}", "(none left: the job's pods were deleted)"))
     return items

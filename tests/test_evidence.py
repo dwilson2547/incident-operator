@@ -60,6 +60,30 @@ def test_job_alert_reads_the_job_and_its_newest_pod():
     assert any(i.source == "pod postgres/new" for i in items)              # the newest pod, not the old one
 
 
+def test_job_with_retries_shows_every_attempt_and_the_first_failure():
+    """2026-11-01: attempt 1 was OOMKilled after saving its snapshot; attempt 2 failed on the lock it left. The model
+    only saw attempt 2 and blamed the script."""
+    job = {"spec": {"backoffLimit": 1}, "status": {"failed": 2, "conditions": []}}
+    def pod(name, ts, term):
+        return {"metadata": {"name": name, "creationTimestamp": ts},
+                "spec": {"containers": [{"name": "restic"}]},
+                "status": {"phase": "Failed", "containerStatuses": [{"name": "restic", "state": {"terminated": term}}]}}
+    first = pod("bk-1", "2026-11-01T12:00:00Z", {"reason": "OOMKilled", "exitCode": 137})
+    second = pod("bk-2", "2026-11-01T12:08:00Z", {"reason": "Error", "exitCode": 1})
+    k = FakeK8s({"/apis/batch/v1/namespaces/ob/jobs/bk": job, "/api/v1/namespaces/ob/events": {"items": []},
+                 "/api/v1/namespaces/ob/pods": {"items": [second, first]},
+                 "/api/v1/namespaces/ob/pods/bk-1": first, "/api/v1/namespaces/ob/pods/bk-2": second,
+                 "/api/v1/namespaces/ob/pods/bk-1/log?previous=false": "snapshot saved\n== check" + "x" * 5000,
+                 "/api/v1/namespaces/ob/pods/bk-2/log?previous=false": "already initialized"})
+    items = collect(k, {"namespace": "ob", "job_name": "bk"})
+    attempts = next(i for i in items if i.source.startswith("attempts of job"))
+    assert attempts.content.index("bk-1") < attempts.content.index("bk-2") and "OOMKilled" in attempts.content
+    pods = [i.source for i in items if i.kind == "pod" and i.source.startswith("pod ")]
+    assert pods == ["pod ob/bk-1", "pod ob/bk-2"]                          # first failure, then the newest
+    logs = [i for i in items if i.kind == "logs"]
+    assert len(logs[0].content) <= evidence.LOG_CHARS // 2 + 1 and "already initialized" in logs[1].content
+
+
 def test_node_exporter_instance_maps_to_a_node_and_tower_to_nothing():
     node = {"metadata": {"name": "k8s-worker1"},
             "status": {"addresses": [{"type": "InternalIP", "address": "192.168.0.36"}],
