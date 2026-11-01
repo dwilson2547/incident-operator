@@ -46,7 +46,8 @@ def target(labels: dict) -> str:
 
 def compose(inc: dict, cfg: SmtpConfig) -> EmailMessage:
     labels = inc["labels"]
-    where = target(labels)
+    t = inc.get("target")
+    where = (f"{t['kind']} {t['namespace'] + '/' if t.get('namespace') else ''}{t['name']}" if t else target(labels))
     ok = inc["status"] == "analysed"
     msg = EmailMessage()
     msg["Subject"] = f"[triage] {inc['alertname']}" + (f" · {where}" if where else "") + ("" if ok else " (analysis failed)")
@@ -59,16 +60,20 @@ def compose(inc: dict, cfg: SmtpConfig) -> EmailMessage:
         lines.append(ann["summary"])
     lines.append("")
     if ok:
+        turns = sum(1 for x in inc.get("turns") or [] if x.get("session") == "investigation")
         lines += [inc.get("analysis") or "(empty answer)", "",
-                  f"Answered by {inc.get('analysis_model') or '?'} on {inc.get('analysis_worker') or '?'}. "
-                  "Suggestion only: nothing was changed."]
+                  f"Answered by {inc.get('analysis_model') or '?'} on {inc.get('analysis_worker') or '?'}"
+                  + (f" after {turns} investigation turn{'s' if turns != 1 else ''}" if turns else "")
+                  + ". Suggestion only: nothing was changed."]
     else:
         lines += [f"The model couldn't analyse this one: {inc.get('error') or 'unknown error'}."]
     ev = inc.get("evidence") or []
     if ev:
-        lines += ["", "Evidence it was given:"] + [f"  - {e['source']}" + (" (could not read)" if e.get("error") else "")
-                                                   for e in ev]
-    lines += ["", "No runbook covers this alert yet."]
+        lines += ["", "Evidence it was given:"] + [
+            f"  - {e.get('operation') or e['source']}" + (" (asked for)" if e.get("trigger") == "requested" else "")
+            + (" (could not read)" if e.get("error") else "") for e in ev]
+    lines += ["", f"Runbook: {inc['runbook']} ({inc.get('runbook_rev') or '?'})." if inc.get("runbook")
+              else "No runbook covers this alert yet."]
     if cfg.public_url:
         lines.append(f"Incident: {cfg.public_url}/#/incident/{inc['id']}")
     msg.set_content("\n".join(lines))

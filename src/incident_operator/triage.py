@@ -63,6 +63,8 @@ class Config:
                    fallback_after_seconds=int(e.get("TRIAGE_FALLBACK_AFTER_SECONDS", cls.fallback_after_seconds)),
                    deadline_seconds=int(e.get("TRIAGE_DEADLINE_SECONDS", cls.deadline_seconds)),
                    max_new_tokens=int(e.get("TRIAGE_MAX_NEW_TOKENS", cls.max_new_tokens)),
+                   investigate_max_new_tokens=int(e.get("TRIAGE_INVESTIGATE_MAX_NEW_TOKENS",
+                                                        cls.investigate_max_new_tokens)),
                    primer_path=e.get("PRIMER_PATH", cls.primer_path),
                    repeat_window_seconds=int(e.get("TRIAGE_REPEAT_WINDOW_SECONDS", cls.repeat_window_seconds)),
                    max_per_hour=int(e.get("TRIAGE_MAX_PER_HOUR", cls.max_per_hour)),

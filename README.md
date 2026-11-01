@@ -8,9 +8,44 @@ domains: [ai]
 Turns Alertmanager alerts into tracked incidents and has a small local LLM (through gpu-scheduler) triage each one.
 The model picks and explains; code decides what can run. Design: [`docs/design.md`](docs/design.md).
 
-**Status: phase 1 (suggest-only), built 2026-11-01.** Nothing it does changes the cluster.
+**Status: phase 2a (runbooks, suggest-only), built 2026-11-01.** Nothing it does changes the cluster. Phase 2b (node
+probes) and phase 3 (approved fixes) are next (design §14).
 
-## What phase 1 does
+## Runbooks (phase 2a)
+
+An alert that matches a runbook (`helm/incident-operator/files/runbooks/*.md`) gets a two-session triage instead of
+the generic one below (design §6):
+1. **Target** from the alert's labels (or `instance` → node by IP), never from the model.
+2. **Precursors:** the runbook's read-only operations (`files/operations/*.yaml`) run in code first.
+3. **Investigation:** up to 3 JSON turns. Each either asks for operations from the runbook's menu (they run and the
+   results go back) or finishes with findings (what failed, where, confidence, summary). gpu-scheduler holds the reply
+   to a JSON schema (constrained decoding); the last turn's schema only allows finishing.
+4. **Remediation:** one call that sees the findings and the runbook's `## Remediation`, never raw logs. Its advice
+   (suggestion, why, will it fix itself, escalate) is the email and the page's answer.
+
+| Runbook | Alerts | Target |
+|---|---|---|
+| `pod-crashloop` | `KubePodCrashLooping` | the pod |
+| `backup-job-failed` | `PostgresBackupJobFailed`, `OffsiteBackupJobFailed`, `SecretsBackupJobFailed` | the Job |
+| `nfs-client-wedge` | `NodeLoadHighCPUIdle` (new, cluster-config) | the node |
+| `scraper-failures` | `ScrapeJobStale`, `ScrapeJobSuspended` | the ScrapeJob |
+
+Operation kinds: `k8s-summary` (pod/Job/workload/node status, events, logs), `k8s-get` (fields of any object, e.g. a
+ScrapeJob), `k8s-events` (by reason, node or object), `k8s-logs`, `promql`, `promql-range` (downsampled), and
+`alert-objects` (the generic phase-1 evidence). Parameters come from `target.*`, `alertLabel:<name>` or
+`result:<operation>.<path>`, and are refused unless they look like plain names. No `logql`: Loki holds only object
+store audit logs today. Files are validated on load (references, parameter sources, the design's size limits); a bad
+file is rejected and its last good version stays live. The **Runbooks** page lists what loaded, what was rejected
+and why, and how often each runbook matched.
+
+**Replay** a stored incident against edited runbooks or another model (results come from what was stored, never
+the live cluster):
+
+```bash
+DATABASE_URL=... GPU_SCHEDULER_URL=... GPU_SCHEDULER_TOKEN=... .venv/bin/python -m incident_operator replay 12 15 --model gemma4-26b-a4b
+```
+
+## Without a runbook (phase 1)
 
 1. **Intake:** Alertmanager posts the alerts it also mails (critical, plus the listed warnings) to the webhook. One
    incident per alert fingerprint: re-sends update it, a resolve closes it, the next firing opens a new one.
@@ -40,8 +75,10 @@ answers found the right container, exit code and log line.
 
 - `src/incident_operator/db.py`: incidents, evidence, model turns (schema created on start).
 - `src/incident_operator/evidence.py`: the read-only Kubernetes reads and the budget.
-- `src/incident_operator/triage.py`: prompt, gpu-scheduler client, and the engine (three idempotent passes: new →
-  submit, poll, notify).
+- `src/incident_operator/triage.py`: the engine (idempotent passes: new → submit, poll, notify), the phase-1 prompt
+  and the gpu-scheduler client.
+- `src/incident_operator/library.py`, `ops.py`, `investigate.py`, `replay.py`: runbook/operation loading, running
+  read-only operations, the two runbook sessions, replay.
 - `src/incident_operator/notify.py`: SMTP email (same settings as scrape-job-manager).
 - `src/incident_operator/app.py` + `static/index.html`: the webhook (port 8081, in-cluster Service only, no Ingress,
   so the LAN can't inject alerts) and the page (8080).
@@ -60,6 +97,8 @@ answers found the right container, exit code and log line.
 | `PRIMER_PATH` | the primer file (the chart mounts it at `/etc/incident-operator/primer.md`) |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_TO`, `PUBLIC_URL` | email; off unless host, from and to are set |
 | `UI_PORT`, `WEBHOOK_PORT` | 8080, 8081 |
+| `RUNBOOKS_DIR`, `OPERATIONS_DIR`, `PROMETHEUS_URL` | the mounted ConfigMaps; Prometheus for `promql` operations |
+| `TRIAGE_INVESTIGATE_MAX_NEW_TOKENS` | 768, per investigation/remediation turn |
 | `KUBE_API_URL` | local runs: e.g. `kubectl proxy` at `http://127.0.0.1:8001`; in the cluster the service account is used |
 | `EVIDENCE=off` | skip the Kubernetes reads |
 

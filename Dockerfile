@@ -1,6 +1,6 @@
 # incident-operator: webhook (8081), UI (8080) and the triage loop in one process.
 # Dependencies before code, so a code change rebuilds only the top layer. No cluster specifics in the image: the
-# environment primer (and later the runbooks) come from the chart as a ConfigMap.
+# environment primer, runbooks and operations come from the chart as ConfigMaps.
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 RUN useradd --uid 10001 --create-home app

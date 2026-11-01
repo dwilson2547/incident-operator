@@ -1,6 +1,7 @@
 {{- $labels := dict "app.kubernetes.io/part-of" "incident-operator" "app.kubernetes.io/managed-by" .Release.Service }}
-# The environment primer every triage prompt carries (files/primer.md). Mounted as a directory, not with subPath, so an
-# update reaches the pod within a minute and the next prompt reads it: no restart.
+# The environment primer every prompt carries (files/primer.md), and the runbooks and read-only operations (design
+# §4.3). Each is mounted as a directory, not with subPath, so a push reaches the pod within a minute and the next
+# pass re-reads it: no restart. A file that fails validation is rejected and the last good version stays live.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -10,7 +11,30 @@ data:
   primer.md: |
 {{ .Files.Get "files/primer.md" | indent 4 }}
 ---
-# Read-only: the evidence for an alert (pods and their logs, events, Jobs, workloads, nodes). Phase 1 changes nothing.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: incident-operator-runbooks
+  labels: {{- toYaml $labels | nindent 4 }}
+data:
+{{- range $path, $_ := .Files.Glob "files/runbooks/*.md" }}
+  {{ base $path }}: |
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: incident-operator-operations
+  labels: {{- toYaml $labels | nindent 4 }}
+data:
+{{- range $path, $_ := .Files.Glob "files/operations/*.yaml" }}
+  {{ base $path }}: |
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}
+---
+# Read-only: the evidence for an alert (pods and their logs, events, Jobs, workloads, nodes, scrape-job-manager's
+# ScrapeJobs). Nothing in phase 1 or 2 changes anything.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -31,6 +55,9 @@ rules:
     verbs: [get, list]
   - apiGroups: [apps]
     resources: [deployments, statefulsets, daemonsets]
+    verbs: [get, list]
+  - apiGroups: [scrape.danwils.com]
+    resources: [scrapejobs, scrapers, scrapepools]
     verbs: [get, list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -79,7 +106,11 @@ spec:
             - {name: TRIAGE_REPEAT_WINDOW_SECONDS, value: {{ .Values.triage.repeatWindowSeconds | quote }}}
             - {name: TRIAGE_MAX_PER_HOUR, value: {{ .Values.triage.maxPerHour | quote }}}
             - {name: TRIAGE_SKIP_RESOLVED_AFTER_SECONDS, value: {{ .Values.triage.skipResolvedAfterSeconds | quote }}}
-            - {name: PRIMER_PATH, value: /etc/incident-operator/primer.md}
+            - {name: PRIMER_PATH, value: /etc/incident-operator/primer/primer.md}
+            - {name: RUNBOOKS_DIR, value: /etc/incident-operator/runbooks}
+            - {name: OPERATIONS_DIR, value: /etc/incident-operator/operations}
+            - {name: PROMETHEUS_URL, value: {{ .Values.prometheusUrl | quote }}}
+            - {name: TRIAGE_INVESTIGATE_MAX_NEW_TOKENS, value: {{ .Values.triage.investigateMaxNewTokens | quote }}}
             - {name: SMTP_HOST, value: {{ .Values.smtp.host | quote }}}
             - {name: SMTP_PORT, value: {{ .Values.smtp.port | quote }}}
             - {name: SMTP_USERNAME, value: {{ .Values.smtp.username | quote }}}
@@ -89,7 +120,9 @@ spec:
             - {name: SMTP_TO, value: {{ .Values.smtp.to | quote }}}
             - {name: PUBLIC_URL, value: {{ .Values.ui.publicUrl | quote }}}
           volumeMounts:
-            - {name: files, mountPath: /etc/incident-operator, readOnly: true}
+            - {name: files, mountPath: /etc/incident-operator/primer, readOnly: true}
+            - {name: runbooks, mountPath: /etc/incident-operator/runbooks, readOnly: true}
+            - {name: operations, mountPath: /etc/incident-operator/operations, readOnly: true}
           readinessProbe:
             httpGet: {path: /healthz, port: ui}
             periodSeconds: 10
@@ -100,6 +133,10 @@ spec:
       volumes:
         - name: files
           configMap: {name: incident-operator-files}
+        - name: runbooks
+          configMap: {name: incident-operator-runbooks}
+        - name: operations
+          configMap: {name: incident-operator-operations}
 ---
 apiVersion: v1
 kind: Service

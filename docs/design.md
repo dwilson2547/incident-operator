@@ -665,7 +665,11 @@ After several approved runs where the post-check passed, raising it to `auto` is
 1. **Suggest-only triage.** ✅ Built 2026-11-01 (README). Webhook intake, incidents, the no-runbook triage (§6.5)
    with generic read-only evidence, needs-runbook list, minimal UI, email. The environment primer (§9.4) is in from the
    start. Checked end to end against the real cluster: two real failed Jobs triaged in 25 s with correct answers.
-2. **Runbooks, precursors and read-only operations.** File loading and validation, precursors, the investigation
+2. **Runbooks, precursors and read-only operations.** 2a ✅ built 2026-11-01 (README "Runbooks"): everything below
+   except probes, with four runbooks (crashloops, backup job failures, NFS wedge without the D-state probe, scraper
+   failures). Changes from this section: files reload from the mounted ConfigMap folders rather than an API watch
+   (same effect, less code); revisions are content hashes, not git commits; no `logql` kind (Loki holds no pod logs
+   yet); the hourly cap counts incidents, not turns. 2b: probes (§5.3). Originally: File loading and validation, precursors, the investigation
    loop, findings, the remediation session as suggestion only, probes, replay. First runbooks: NFS client wedge
    (§12), the scraper failure classes, `KubeJobFailed` for backups.
 3. **Approved fixes.** Mutating operations, the executor with `DeletePods` and `CreateJobFrom`, generated RBAC, pre-

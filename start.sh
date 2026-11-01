@@ -12,7 +12,8 @@ if ! docker ps --format '{{.Names}}' | grep -qx io-pg; then
 fi
 export PGPASSWORD=dev                     # libpq reads it, so the URL carries no password
 export DATABASE_URL="postgresql://postgres@127.0.0.1:55444/postgres"
-export EVIDENCE=off PRIMER_PATH="$PWD/helm/incident-operator/files/primer.md"
+F="$PWD/helm/incident-operator/files"
+export EVIDENCE=off PRIMER_PATH="$F/primer.md" RUNBOOKS_DIR="$F/runbooks" OPERATIONS_DIR="$F/operations"
 export UI_PORT=${UI_PORT:-8090} WEBHOOK_PORT=${WEBHOOK_PORT:-8091}
 nohup .venv/bin/python -m incident_operator > .pids/io.log 2>&1 &
 echo $! > .pids/io.pid
