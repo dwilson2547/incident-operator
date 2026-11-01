@@ -11,7 +11,8 @@ fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 ssh-keygen -q -t ed25519 -N "" -C "argocd@home-cluster ($REPO, read-only)" -f "$TMP/key"
-gh repo deploy-key add "$TMP/key.pub" -R "$REPO" --title "argocd (read-only)"
+# REST rather than `gh repo deploy-key` (older gh releases lack it).
+gh api "repos/$REPO/keys" -f title="argocd (read-only)" -f key="$(cat "$TMP/key.pub")" -F read_only=true --silent
 kubectl -n argocd create secret generic repo-incident-operator \
   --from-literal=type=git --from-literal=url="git@github.com:$REPO.git" --from-file=sshPrivateKey="$TMP/key" >/dev/null
 kubectl -n argocd label secret repo-incident-operator argocd.argoproj.io/secret-type=repository >/dev/null
