@@ -1,10 +1,14 @@
 # This instance (home cluster). Deployed by Argo from git with this file layered on values.yaml.
 image:
-  tag: sha-1bb76f88f6e4
+  tag: sha-060d1aefd1fd
 executor:
   enabled: true
-# authentik sign-in: only incident-operator-admins get in; only signed-in users can approve fixes.
+# Public at https://incident-operator.danwils.com, authentik sign-in: only incident-operator-admins get in, and only
+# signed-in users can approve fixes.
 ui:
+  host: incident-operator.danwils.com
+  publicUrl: https://incident-operator.danwils.com
+  tlsSecretName: incident-operator-danwils-com-tls
   oidc:
     issuer: https://auth.danwils.com/application/o/incident-operator/
     secret: incident-operator-oidc
