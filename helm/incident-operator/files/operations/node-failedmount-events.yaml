@@ -8,4 +8,4 @@ run:
   reason: FailedMount
   host: "{node}"
   limit: 12
-budget: {maxChars: 3000}
+budget: {maxChars: 8000}

@@ -143,8 +143,8 @@ def parse_operation(path: Path, raw: bytes | None = None) -> Operation:
             raise LoadError(f"param {p}: from must be target.name|namespace|kind, alertLabel:<label> or "
                             "result:<operation>.<path>")
     budget = (d.get("budget") or {}).get("maxChars", 3000)
-    if not isinstance(budget, int) or not 200 <= budget <= 8000:
-        raise LoadError("budget.maxChars must be 200..8000")
+    if not isinstance(budget, int) or not 200 <= budget <= 32000:
+        raise LoadError("budget.maxChars must be 200..32000")
     op = Operation(name=name, description=" ".join(desc.split()), params=params, run=run, budget_chars=budget,
                    rev=_hash(raw), path=str(path), mutating=mutating)
     if mutating:

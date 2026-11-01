@@ -8,4 +8,4 @@ run:
   kind: k8s-summary
   object: {kind: Pod, namespace: "{namespace}", name: "{pod}"}
   logs: false
-budget: {maxChars: 3000}
+budget: {maxChars: 8000}

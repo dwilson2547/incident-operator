@@ -1,5 +1,5 @@
 name: pod-previous-logs
-description: The last 120 log lines of the pod's previous (crashed) container, which usually end with the error.
+description: The last 300 log lines of the pod's previous (crashed) container, which usually end with the error.
 mutating: false
 params:
   namespace: {from: target.namespace}
@@ -9,5 +9,5 @@ run:
   namespace: "{namespace}"
   pod: "{pod}"
   previous: true
-  lines: 120
-budget: {maxChars: 4000}
+  lines: 300
+budget: {maxChars: 16000}

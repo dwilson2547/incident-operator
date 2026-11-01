@@ -106,7 +106,7 @@ def test_one_failed_read_keeps_the_rest():
 
 
 def test_whole_set_stays_within_the_budget():
-    big = "x" * 4000
+    big = "x" * evidence.LOG_CHARS                   # four full logs: over the whole budget
     k = FakeK8s({"/api/v1/namespaces/a/pods/p": {**POD, "spec": {**POD["spec"], "containers": [{"name": "c1"}, {"name": "c2"}]},
                                                  "status": {**POD["status"], "containerStatuses": [
                                                      {"name": "c1", "restartCount": 1}, {"name": "c2", "restartCount": 1}]}},

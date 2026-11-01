@@ -1,0 +1,12 @@
+name: job-failure-kind
+description: For the failed Job - how many of its containers were OOMKilled, and whether it hit its deadline (a hang) rather than failing with an error.
+mutating: false
+params:
+  namespace: {from: alertLabel:namespace}
+  job: {from: alertLabel:job_name}
+run:
+  kind: promql
+  queries:
+    oomkilled: 'count(kube_pod_container_status_terminated_reason{namespace="{namespace}", reason="OOMKilled"} * on(namespace, pod) group_left() kube_pod_owner{owner_kind="Job", owner_name="{job}"}) or vector(0)'
+    deadline_exceeded: 'max(kube_job_status_failed{namespace="{namespace}", job_name="{job}", reason="DeadlineExceeded"}) or vector(0)'
+budget: {maxChars: 400}

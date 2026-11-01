@@ -7,4 +7,4 @@ params:
 run:
   kind: k8s-summary
   object: {kind: Job, namespace: "{namespace}", name: "{job}"}
-budget: {maxChars: 8000}
+budget: {maxChars: 32000}

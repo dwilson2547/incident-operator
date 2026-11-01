@@ -268,3 +268,10 @@ def test_metrics_for_the_operators_own_alerts(conn):
         assert "last_pass" not in text                                     # no pass yet: absent() is what fires
         engine.last_pass = 1793550000.4
         assert "incident_operator_last_pass_timestamp_seconds 1793550000" in c.get("/metrics").text
+
+
+def test_long_prompts_skip_the_small_context_fallback():
+    from incident_operator.triage import Config, fits_fallback
+    cfg = Config()
+    assert fits_fallback([{"role": "user", "content": "x" * 30000}], cfg)               # ~10k tokens
+    assert not fits_fallback([{"role": "user", "content": "x" * 60000}], cfg)           # ~20k: over the Mac's 16k

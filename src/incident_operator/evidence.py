@@ -17,11 +17,11 @@ from typing import Any, Callable
 
 log = logging.getLogger("incident_operator.evidence")
 
-ITEM_CHARS = 3000
-LOG_CHARS = 4000
-LOG_LINES = 80
-EVENTS = 15
-BUDGET_CHARS = 14000            # all evidence for one incident (the 9B's prompt stays around 4-5k tokens)
+ITEM_CHARS = 8000
+LOG_CHARS = 16000
+LOG_LINES = 300
+EVENTS = 30
+BUDGET_CHARS = 48000            # all evidence for one incident: ~14k tokens, well inside the 9B's 64k context
 
 
 @dataclass

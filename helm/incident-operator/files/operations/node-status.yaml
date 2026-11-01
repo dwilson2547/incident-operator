@@ -6,4 +6,4 @@ params:
 run:
   kind: k8s-summary
   object: {kind: Node, name: "{node}"}
-budget: {maxChars: 2500}
+budget: {maxChars: 5000}

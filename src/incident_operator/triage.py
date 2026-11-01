@@ -47,6 +47,9 @@ class Config:
     model: str = "qwen35-9b"
     fallback: list[str] = field(default_factory=lambda: ["gemma4-26b-a4b"])
     fallback_after_seconds: int = 60
+    # The fallback (gemma4-26b-a4b on the Mac) has a 16k context in gpu-scheduler's values: a longer prompt would fail
+    # there, so it is sent to the main model only. Estimated at 3 characters a token (logs tokenize worse than prose).
+    fallback_max_prompt_tokens: int = 12000
     deadline_seconds: int = 900
     max_new_tokens: int = 1024
     investigate_max_new_tokens: int = 768      # one JSON reply per turn
@@ -62,6 +65,8 @@ class Config:
         return cls(gpu_url=e.get("GPU_SCHEDULER_URL", cls.gpu_url), gpu_token=e.get("GPU_SCHEDULER_TOKEN", ""),
                    model=e.get("TRIAGE_MODEL", cls.model), fallback=[m for m in fb.split(",") if m.strip()],
                    fallback_after_seconds=int(e.get("TRIAGE_FALLBACK_AFTER_SECONDS", cls.fallback_after_seconds)),
+                   fallback_max_prompt_tokens=int(e.get("TRIAGE_FALLBACK_MAX_PROMPT_TOKENS",
+                                                        cls.fallback_max_prompt_tokens)),
                    deadline_seconds=int(e.get("TRIAGE_DEADLINE_SECONDS", cls.deadline_seconds)),
                    max_new_tokens=int(e.get("TRIAGE_MAX_NEW_TOKENS", cls.max_new_tokens)),
                    investigate_max_new_tokens=int(e.get("TRIAGE_INVESTIGATE_MAX_NEW_TOKENS",
@@ -93,6 +98,10 @@ def build_messages(incident: dict, evidence_text: str, primer: str) -> list[dict
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
+def fits_fallback(messages: list[dict], cfg: "Config") -> bool:
+    return sum(len(m.get("content") or "") for m in messages) / 3 <= cfg.fallback_max_prompt_tokens
+
+
 class GpuScheduler:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -107,7 +116,7 @@ class GpuScheduler:
             item["json_schema"] = json_schema
         body = {"model": self.cfg.model, "inputs": [item],
                 "deadline_seconds": self.cfg.deadline_seconds, "max_attempts": 2}
-        if self.cfg.fallback:
+        if self.cfg.fallback and fits_fallback(messages, self.cfg):
             body |= {"fallback": self.cfg.fallback, "fallback_after_seconds": self.cfg.fallback_after_seconds}
         r = httpx.post(self.cfg.gpu_url + "/v1/jobs", json=body, headers=self._h(), timeout=30)
         r.raise_for_status()
@@ -127,6 +136,10 @@ class Engine:
         self.library, self.runner = library, runner or Runner(k8s)
         self.stopping = False
         self.last_pass: float | None = None      # time of the last pass that completed, for /metrics
+
+    def _fallback(self, messages: list[dict]) -> list[str] | None:
+        """The fallback models this prompt is offered to, as recorded with the turn."""
+        return (self.cfg.fallback or None) if fits_fallback(messages, self.cfg) else None
 
     def step(self) -> int:
         """One pass of each stage. Returns how many things moved."""
@@ -173,7 +186,7 @@ class Engine:
                 self.conn.execute("DELETE FROM evidence WHERE incident_id = %s", (inc["id"],))
                 continue
             db.add_turn(self.conn, inc["id"], session="triage", prompt_version=PROMPT_VERSION, model=self.cfg.model,
-                        fallback=self.cfg.fallback or None, messages=messages, gpu_job_id=job_id)
+                        fallback=self._fallback(messages), messages=messages, gpu_job_id=job_id)
             db.set_status(self.conn, inc["id"], "triaging")
             budget -= 1
             log.info("incident %s (%s): %d evidence items, job %s", inc["id"], inc["alertname"], len(items), job_id)
@@ -235,7 +248,7 @@ class Engine:
             return False
         self._store(inc["id"], precursors, "precursor")
         db.add_turn(self.conn, inc["id"], session="investigation", prompt_version=investigate.PROMPT_VERSION,
-                    model=self.cfg.model, fallback=self.cfg.fallback or None, messages=messages, gpu_job_id=job_id,
+                    model=self.cfg.model, fallback=self._fallback(messages), messages=messages, gpu_job_id=job_id,
                     turn=1, json_schema=schema)
         db.set_status(self.conn, inc["id"], "investigating", runbook=rb.name, runbook_rev=rb.rev, target=target)
         log.info("incident %s (%s): runbook %s, target %s, %d precursors, job %s", inc["id"], inc["alertname"],
@@ -291,7 +304,7 @@ class Engine:
             db.finish_turn(self.conn, turn["id"], **done)
             self._store(inc["id"], results, "requested", round=n)
             db.add_turn(self.conn, inc["id"], session="investigation", prompt_version=investigate.PROMPT_VERSION,
-                        model=self.cfg.model, fallback=self.cfg.fallback or None, messages=messages,
+                        model=self.cfg.model, fallback=self._fallback(messages), messages=messages,
                         gpu_job_id=job_id, turn=n + 1, json_schema=schema)
             log.info("incident %s: turn %d asked for %s", inc["id"], n, asked)
             return 1
@@ -306,7 +319,7 @@ class Engine:
             return 0
         db.finish_turn(self.conn, turn["id"], **done)
         db.add_turn(self.conn, inc["id"], session="remediation", prompt_version=investigate.PROMPT_VERSION,
-                    model=self.cfg.model, fallback=self.cfg.fallback or None, messages=messages, gpu_job_id=job_id,
+                    model=self.cfg.model, fallback=self._fallback(messages), messages=messages, gpu_job_id=job_id,
                     turn=n + 1, json_schema=schema)
         db.set_status(self.conn, inc["id"], "advising", findings=findings)
         log.info("incident %s: findings after %d turn(s), confidence %s", inc["id"], n, findings.get("confidence"))

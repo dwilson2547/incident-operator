@@ -7,9 +7,14 @@ params:
   cronjob: {from: alertLabel:cronjob}
 # Not while a run is going (the manual Job isn't covered by the CronJob's concurrencyPolicy), and not when someone
 # suspended the CronJob on purpose. status.active is left out of a CronJob's status when nothing runs.
+#
+# And the runbook's "never rerun" cases that metrics can see (2026-11-01: the model proposed a rerun after an
+# OOMKill): an OOMKilled container or a hang to the deadline fails the same way again.
 pre:
   - {op: cronjob-status, expect: "status.active == null"}
   - {op: cronjob-status, expect: "spec.suspend == false"}
+  - {op: job-failure-kind, expect: "oomkilled.0.value == 0"}
+  - {op: job-failure-kind, expect: "deadline_exceeded.0.value == 0"}
 run:
   verb: CreateJobFrom
   namespaces: [postgres, offsite-backup, secrets-backup]

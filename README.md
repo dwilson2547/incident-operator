@@ -38,7 +38,7 @@ operations: [tower-load, {restart-csi-nfs-node: {autonomy: approve}}]    # in th
 | Fix | Verb | Pre | Post (after 120 s) | Autonomy |
 |---|---|---|---|---|
 | `restart-csi-nfs-node` | delete the node's `csi-nfs-node` pod | stuck `mount.nfs` older than 10 min, children of the CSI pod; only this node wedged; Tower under 1.0 load per core | no stuck `mount.nfs`; DaemonSet fully available | `suggest`, `approve` in `nfs-client-wedge` |
-| `rerun-backup-job` | a Job from the backup CronJob (postgres, offsite-backup, secrets-backup) | no run active; not suspended | (90 s) a Job of the CronJob started; the backup alerts judge the result | `suggest` in `backup-job-failed` |
+| `rerun-backup-job` | a Job from the backup CronJob (postgres, offsite-backup, secrets-backup) | no run active; not suspended; the failed Job wasn't OOMKilled or past its deadline | (90 s) a Job of the CronJob started; the backup alerts judge the result | `suggest` in `backup-job-failed` |
 
 Checks are `<path> <op> <literal>` on a read-only operation's structured result (`==`, `!=`, `>`, `>=`, `<`, `<=`;
 numbers, `true`, `false`, `null`, `"text"`; strict, so `1` is not `true`).
@@ -107,7 +107,8 @@ never proposes or runs a fix.
 2. **Evidence**, collected by code, read-only, before any model call: for whatever the alert's labels name, a pod's
    status, events and log tail (and the previous container's after a restart), a Job's status and its newest pod, a
    workload's status and events, a node's conditions (node-exporter's `instance` IP is mapped to the node). Capped per
-   item and per incident (14k characters), so a small model's prompt stays around 1.5–5k tokens.
+   item and per incident (48k characters, ~14k tokens; widened 2026-11-01 after a cut log hid the cause), well inside
+   the 9B's 64k context. A prompt too long for the fallback's 16k context goes to the main model only.
 3. **Triage:** one call to gpu-scheduler with the system prompt, the environment primer
    (`helm/incident-operator/files/primer.md`, mounted, read on every call) and the evidence. `qwen35-9b` on the
    3080, with `gemma4-26b-a4b` on the Mac as fallback after 60 s. Every prompt is stored as sent.

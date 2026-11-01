@@ -20,8 +20,10 @@ from .ops import Result
 
 PROMPT_VERSION = "runbook-v3"
 MAX_ROUNDS = 3
-PRECURSOR_CHARS = 16000          # all precursor results in the first turn
-REQUESTED_CHARS = 10000          # all requested results in one round
+# Generous on purpose (2026-11-01: a cut log tail hid the first attempt's cause and that its snapshot was saved). The
+# last turn carries all of it: ~48k + 2 x 32k characters is ~35k tokens with the runbook, inside the 9B's 64k context.
+PRECURSOR_CHARS = 48000          # all precursor results in the first turn
+REQUESTED_CHARS = 32000          # all requested results in one round
 
 INVESTIGATE_SYSTEM = """You are a triage agent investigating one alert in a Kubernetes cluster. You read evidence and \
 decide what failed. You cannot change anything; you can only ask for more read-only checks from the menu.
