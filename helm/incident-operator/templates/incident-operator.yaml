@@ -189,13 +189,34 @@ spec:
   selector: {app: incident-operator}
   ports: [{name: http, port: 80, targetPort: webhook}]
 ---
+# The page. With ui.tlsSecretName it is public (Cloudflare -> traefik-public, DNS by external-dns, certificate by
+# cert-manager, and the public entrypoint's origin lockdown and rate limits), which needs sign-in: the chart refuses
+# a public page without ui.oidc.issuer. Without it, LAN only (the cluster.local wildcard -> internal Traefik).
+{{- if and .Values.ui.tlsSecretName (not .Values.ui.oidc.issuer) }}
+{{- fail "ui.tlsSecretName makes the incident page public: set ui.oidc.issuer (and ui.oidc.secret) too" }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: incident-operator
-  labels: {{- toYaml $labels | nindent 4 }}
+  labels:
+    {{- toYaml $labels | nindent 4 }}
+    {{- if .Values.ui.tlsSecretName }}
+    dns.danwils.com/public: "true"
+    {{- end }}
+  {{- if .Values.ui.tlsSecretName }}
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.entrypoints: pubsecure
+    external-dns.kubernetes.io/target: danwils.com
+  {{- end }}
 spec:
   ingressClassName: traefik
+  {{- if .Values.ui.tlsSecretName }}
+  tls:
+    - hosts: [{{ .Values.ui.host }}]
+      secretName: {{ .Values.ui.tlsSecretName }}
+  {{- end }}
   rules:
     - host: {{ .Values.ui.host }}
       http:

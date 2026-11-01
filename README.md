@@ -46,6 +46,8 @@ numbers, `true`, `false`, `null`, `"text"`; strict, so `1` is not `true`).
 **Sign-in:** with `ui.oidc.issuer` set, every page needs an authentik sign-in (gpu-scheduler's `oidc.py`), and who
 may sign in is the `incident-operator-admins` group (cluster-config `authentik/blueprints/incident-operator.yaml`).
 Without it the page is open on the LAN and fixes can't be approved (`ALLOW_ANONYMOUS_DECISIONS=1` is for local runs).
+`ui.tlsSecretName` publishes the page (`ui.host` a `*.danwils.com` name; DNS, certificate and edge limits follow from
+the Ingress, cluster-config "Public vs internal ingress"); the chart refuses that without `ui.oidc.issuer`.
 
 ## Runbooks (phase 2a)
 

@@ -2,11 +2,12 @@ image:
   repository: dwilson2547/incident-operator
   tag: latest
 
-# The incident page. LAN-only (cluster.local wildcard -> LAN Traefik). With oidc.issuer set, every page needs an
+# The incident page. LAN-only unless tlsSecretName is set (then public). With oidc.issuer set, every page needs an
 # authentik sign-in and only signed-in users can approve fixes; without it the page is open and fixes can't be approved.
 ui:
   host: incident-operator.cluster.local
   publicUrl: http://incident-operator.cluster.local     # email links, and the sign-in callback's base
+  tlsSecretName: ""             # set (with a *.danwils.com host and oidc) to publish the page
   oidc:
     issuer: ""                 # e.g. https://auth.danwils.com/application/o/incident-operator/
     clientId: incident-operator
