@@ -56,7 +56,7 @@ def main() -> None:
     k8s = (None if os.environ.get("EVIDENCE", "on") == "off"
            else K8s(base=os.environ["KUBE_API_URL"]) if os.environ.get("KUBE_API_URL") else K8s())
     library = Library(os.environ.get("RUNBOOKS_DIR", "/etc/incident-operator/runbooks"),
-                      os.environ.get("OPERATIONS_DIR", "/etc/incident-operator/operations"))
+                      os.environ.get("OPERATIONS_DIR", "/etc/incident-operator/operations"), store=db.LastGood(conn))
     library.refresh()
     engine = Engine(conn, cfg, k8s, GpuScheduler(cfg), Notifier(smtp) if smtp.usable else None, library=library)
     threading.Thread(target=engine.run_forever, name="triage", daemon=True).start()

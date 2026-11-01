@@ -126,6 +126,15 @@ CREATE TABLE IF NOT EXISTS op_runs (
     notified       text
 );
 CREATE INDEX IF NOT EXISTS op_runs_incident ON op_runs (incident_id);
+
+-- The last version of each runbook and operation file that loaded (library.Library), so a rejected file falls back to
+-- it even after a restart.
+CREATE TABLE IF NOT EXISTS library_last_good (
+    file      text PRIMARY KEY,                    -- runbooks/<name>.md | operations/<name>.yaml
+    content   bytea NOT NULL,
+    rev       text NOT NULL,
+    saved_at  timestamptz NOT NULL DEFAULT now()
+);
 CREATE INDEX IF NOT EXISTS op_runs_active ON op_runs (status)
     WHERE status IN ('proposed', 'approved', 'ready', 'running', 'settling');
 """
@@ -395,6 +404,25 @@ def operation_records(conn: psycopg.Connection) -> list[dict]:
                max(finished_at) FILTER (WHERE status IN ('post_failed', 'failed')) AS last_failure
         FROM op_runs GROUP BY operation
         """).fetchall()
+
+
+# -- library ---------------------------------------------------------------------------------------------------------
+
+class LastGood:
+    """library.Library's store for the last good version of each file."""
+
+    def __init__(self, conn: psycopg.Connection):
+        self.conn = conn
+
+    def save(self, file: str, content: bytes, rev: str) -> None:
+        self.conn.execute(
+            "INSERT INTO library_last_good (file, content, rev) VALUES (%s, %s, %s) ON CONFLICT (file) DO UPDATE"
+            " SET content = EXCLUDED.content, rev = EXCLUDED.rev, saved_at = now()"
+            " WHERE library_last_good.rev <> EXCLUDED.rev", (file, content, rev))
+
+    def load(self, file: str) -> tuple[bytes, datetime] | None:
+        row = self.conn.execute("SELECT content, saved_at FROM library_last_good WHERE file = %s", (file,)).fetchone()
+        return (bytes(row["content"]), row["saved_at"]) if row else None
 
 
 # -- reading (UI) ------------------------------------------------------------------------------------------------------

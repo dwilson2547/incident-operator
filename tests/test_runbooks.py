@@ -297,3 +297,25 @@ def test_results_respect_the_budget():
     big = [Result("a", "a", "x" * 9000), Result("b", "b", "y" * 9000)]
     text = investigate.render_results(big, 10000)
     assert len(text) < 10600 and "cut to fit" in text
+
+
+@needs_pg
+def test_last_good_version_survives_a_restart(conn, lib_dirs):
+    """2026-11-01: a new chart reached a pod running an older image, which rejected the NFS runbook; the in-memory
+    last good version was gone because the pod had restarted."""
+    good = load_with(lib_dirs, conn)
+    rev = good.runbooks["pod-crashloop"].rev
+    rb = lib_dirs / "runbooks" / "pod-crashloop.md"
+    rb.write_text(rb.read_text().replace("operations: [", "operations: [no-such-op, "))
+    after_restart = load_with(lib_dirs, conn)                     # a new process: nothing in memory
+    assert after_restart.runbooks["pod-crashloop"].rev == rev
+    assert "serving the last good version, saved" in after_restart.errors["runbooks/pod-crashloop.md"]
+    (lib_dirs / "runbooks" / "nfs-client-wedge.md").unlink()       # removed from the chart: not brought back
+    assert "nfs-client-wedge" not in load_with(lib_dirs, conn).runbooks
+    assert load(lib_dirs).runbooks.get("pod-crashloop") is None    # without a store, nothing to fall back on
+
+
+def load_with(d, conn):
+    lib = Library(str(d / "runbooks"), str(d / "operations"), store=db.LastGood(conn))
+    lib.refresh()
+    return lib

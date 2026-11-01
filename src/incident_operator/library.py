@@ -3,6 +3,9 @@
 The chart renders `files/runbooks/*.md` and `files/operations/*.yaml` into ConfigMaps mounted as folders, so a push
 reaches the pod within a minute and `refresh()` (called on every engine pass) picks it up with no restart. A file that
 fails validation is rejected and the last good version of it stays live; the error is listed on the Runbooks page.
+With a store (db.LastGood), every file that loads is also saved, so the last good version survives a restart: a pod
+that starts with a bad file (a new chart ahead of its image, 2026-11-01) loads the saved one instead. Only files still
+present fall back; a file removed from the chart is gone.
 
 A runbook's frontmatter is what code uses (match, target, precursors, operations); its body is what the model reads.
 An operation's revision is the hash of its file, a runbook's the hash of its file plus those of the operations it
@@ -105,8 +108,8 @@ def _hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:12]
 
 
-def parse_operation(path: Path) -> Operation:
-    raw = path.read_bytes()
+def parse_operation(path: Path, raw: bytes | None = None) -> Operation:
+    raw = path.read_bytes() if raw is None else raw
     try:
         d = yaml.safe_load(raw)
     except yaml.YAMLError as e:
@@ -246,8 +249,8 @@ def _check_run(run: dict, params: set[str]) -> None:
             raise LoadError("run needs at least one of reason, host, object (all events in a namespace is too much)")
 
 
-def parse_runbook(path: Path, operations: dict[str, Operation]) -> Runbook:
-    raw = path.read_bytes()
+def parse_runbook(path: Path, operations: dict[str, Operation], raw: bytes | None = None) -> Runbook:
+    raw = path.read_bytes() if raw is None else raw
     text = raw.decode()
     m = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.S)
     if not m:
@@ -335,7 +338,8 @@ def parse_runbook(path: Path, operations: dict[str, Operation]) -> Runbook:
 class Library:
     """The loaded runbooks and operations. `refresh()` re-reads the folders when anything in them changed."""
 
-    def __init__(self, runbooks_dir: str | None, operations_dir: str | None):
+    def __init__(self, runbooks_dir: str | None, operations_dir: str | None, store=None):
+        self.store = store                           # db.LastGood, or None (executor, replay, tests)
         self.runbooks_dir = Path(runbooks_dir) if runbooks_dir else None
         self.operations_dir = Path(operations_dir) if operations_dir else None
         self.runbooks: dict[str, Runbook] = {}
@@ -358,13 +362,18 @@ class Library:
         errors: dict[str, str] = {}
         ops: dict[str, Operation] = {}
         for p in self._files(self.operations_dir, "*.y*ml"):
+            key = f"operations/{p.name}"
             try:
-                op = parse_operation(p)
+                raw = p.read_bytes()
+                op = parse_operation(p, raw)
                 ops[op.name] = op
+                self._save(key, raw, op.rev)
             except (LoadError, OSError, UnicodeDecodeError) as e:
-                errors[f"operations/{p.name}"] = str(e)
+                errors[key] = str(e)
                 if p.stem in self.operations:                   # the last good version stays live
                     ops[p.stem] = self.operations[p.stem]
+                elif old := self._saved(key, lambda raw: parse_operation(p, raw)):
+                    ops[p.stem], errors[key] = old[0], f"{e} (serving the last good version, saved {old[1]})"
         def bad_checks(op: Operation) -> list[str]:     # a fix's checks must be loaded read-only operations
             return [c.op for c in op.pre + op.post if c.op not in ops or ops[c.op].mutating]
         for op in [o for o in ops.values() if o.mutating]:
@@ -377,18 +386,42 @@ class Library:
                     del ops[op.name]
         rbs: dict[str, Runbook] = {}
         for p in self._files(self.runbooks_dir, "*.md"):
+            key = f"runbooks/{p.name}"
             try:
-                rb = parse_runbook(p, ops)
+                raw = p.read_bytes()
+                rb = parse_runbook(p, ops, raw)
                 rbs[rb.name] = rb
+                self._save(key, raw, rb.rev)
             except (LoadError, OSError, UnicodeDecodeError) as e:
-                errors[f"runbooks/{p.name}"] = str(e)
+                errors[key] = str(e)
                 old = self.runbooks.get(p.stem)
                 if old and all(n in ops for n in old.precursors + old.operations + list(old.fixes)):
                     rbs[p.stem] = old
+                elif saved := self._saved(key, lambda raw: parse_runbook(p, ops, raw)):
+                    rbs[p.stem], errors[key] = saved[0], f"{e} (serving the last good version, saved {saved[1]})"
         self.operations, self.runbooks, self.errors = ops, rbs, errors
         log.info("library: %d runbooks, %d operations, %d rejected%s", len(rbs), len(ops), len(errors),
                  "".join(f"\n  {k}: {v}" for k, v in errors.items()))
         return True
+
+    def _save(self, key: str, raw: bytes, rev: str) -> None:
+        if self.store is not None:
+            try:
+                self.store.save(key, raw, rev)
+            except Exception as e:                      # the files still load; only the fallback is missing
+                log.warning("library: could not save %s as last good: %s", key, e)
+
+    def _saved(self, key: str, parse) -> tuple | None:
+        """The stored last good version of a rejected file, parsed now (it must still load against what's loaded
+        now, e.g. a runbook's operations). (object, when it was saved) or None."""
+        if self.store is None:
+            return None
+        try:
+            found = self.store.load(key)
+            return (parse(found[0]), found[1].strftime("%Y-%m-%d %H:%M UTC")) if found else None
+        except Exception as e:
+            log.warning("library: no usable last good version of %s: %s", key, e)
+            return None
 
     def match(self, labels: dict[str, str]) -> Runbook | None:
         """The matching runbook with the highest priority (ties: by name), or None."""

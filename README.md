@@ -77,7 +77,8 @@ a node. `nfs-dstate`: D-state tasks by command, stuck `mount.nfs` (count, older 
 stuck `nfsplugin` threads, the NFSv4 state manager thread. Run on all four nodes 2026-11-01: ~20 s each. Parameters come from `target.*`, `alertLabel:<name>` or
 `result:<operation>.<path>`, and are refused unless they look like plain names. No `logql`: Loki holds only object
 store audit logs today. Files are validated on load (references, parameter sources, the design's size limits); a bad
-file is rejected and its last good version stays live. The **Runbooks** page lists what loaded, what was rejected
+file is rejected and its last good version stays live, also across a restart (each file that loads is saved in
+Postgres, `library_last_good`). The **Runbooks** page lists what loaded, what was rejected
 and why, and how often each runbook matched.
 
 **Replay** a stored incident against edited runbooks or another model (results come from what was stored, never
