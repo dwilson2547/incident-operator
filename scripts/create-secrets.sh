@@ -61,7 +61,12 @@ else
     --from-file=client_secret=/dev/stdin --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   printf '%s' "$SEC" | kubectl -n "$NS" create secret generic incident-operator-oidc --from-file=client_secret=/dev/stdin >/dev/null
   kubectl -n authentik rollout restart deploy/authentik-server deploy/authentik-worker >/dev/null
-  echo "OIDC client secret written to both Secrets; authentik restarting to load it"
+  kubectl -n authentik rollout status deploy/authentik-worker --timeout=300s >/dev/null
+  # authentik re-applies a blueprint only when its file changes: if it was applied before this Secret existed, the
+  # provider still has an empty client secret (2026-11-01: sign-in failed with invalid_client). Apply it again.
+  kubectl -n authentik exec deploy/authentik-worker -- \
+    ak apply_blueprint mounted/cm-authentik-blueprints-danwils/incident-operator.yaml >/dev/null
+  echo "OIDC client secret written to both Secrets; authentik restarted and the blueprint re-applied"
 fi
 
 echo "done:"; kubectl -n "$NS" get secrets
