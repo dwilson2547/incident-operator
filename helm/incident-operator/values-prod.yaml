@@ -1,3 +1,3 @@
 # This instance (home cluster). Deployed by Argo from git with this file layered on values.yaml.
 image:
-  tag: sha-8e22db015fbb
+  tag: sha-337bac50ce24
