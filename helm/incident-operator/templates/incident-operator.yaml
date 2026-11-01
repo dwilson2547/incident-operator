@@ -1,0 +1,134 @@
+{{- $labels := dict "app.kubernetes.io/part-of" "incident-operator" "app.kubernetes.io/managed-by" .Release.Service }}
+# The environment primer every triage prompt carries (files/primer.md). Mounted as a directory, not with subPath, so an
+# update reaches the pod within a minute and the next prompt reads it: no restart.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: incident-operator-files
+  labels: {{- toYaml $labels | nindent 4 }}
+data:
+  primer.md: |
+{{ .Files.Get "files/primer.md" | indent 4 }}
+---
+# Read-only: the evidence for an alert (pods and their logs, events, Jobs, workloads, nodes). Phase 1 changes nothing.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: incident-operator
+  labels: {{- toYaml $labels | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: incident-operator-read
+  labels: {{- toYaml $labels | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, events, nodes]
+    verbs: [get, list]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: incident-operator-read
+  labels: {{- toYaml $labels | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: incident-operator-read}
+subjects:
+  - {kind: ServiceAccount, name: incident-operator, namespace: {{ .Release.Namespace }}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: incident-operator
+  labels: {{- toYaml $labels | nindent 4 }}
+spec:
+  # One triage loop: two would submit the same incident twice.
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: incident-operator}
+  template:
+    metadata:
+      labels: {app: incident-operator}
+    spec:
+      serviceAccountName: incident-operator
+      containers:
+        - name: incident-operator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          ports:
+            - {name: ui, containerPort: 8080}
+            - {name: webhook, containerPort: 8081}
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ .Values.secrets.database }}, key: DATABASE_URL}}
+            - name: GPU_SCHEDULER_URL
+              value: {{ .Values.triage.gpuSchedulerUrl | quote }}
+            - name: GPU_SCHEDULER_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ .Values.secrets.gpuScheduler }}, key: GPU_SCHEDULER_TOKEN}}
+            - {name: TRIAGE_MODEL, value: {{ .Values.triage.model | quote }}}
+            - {name: TRIAGE_FALLBACK, value: {{ .Values.triage.fallback | quote }}}
+            - {name: TRIAGE_FALLBACK_AFTER_SECONDS, value: {{ .Values.triage.fallbackAfterSeconds | quote }}}
+            - {name: TRIAGE_DEADLINE_SECONDS, value: {{ .Values.triage.deadlineSeconds | quote }}}
+            - {name: TRIAGE_MAX_NEW_TOKENS, value: {{ .Values.triage.maxNewTokens | quote }}}
+            - {name: PRIMER_PATH, value: /etc/incident-operator/primer.md}
+            - {name: SMTP_HOST, value: {{ .Values.smtp.host | quote }}}
+            - {name: SMTP_PORT, value: {{ .Values.smtp.port | quote }}}
+            - {name: SMTP_USERNAME, value: {{ .Values.smtp.username | quote }}}
+            - name: SMTP_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.secrets.smtp }}, key: SMTP_PASSWORD}}
+            - {name: SMTP_FROM, value: {{ .Values.smtp.from | quote }}}
+            - {name: SMTP_TO, value: {{ .Values.smtp.to | quote }}}
+            - {name: PUBLIC_URL, value: {{ .Values.ui.publicUrl | quote }}}
+          volumeMounts:
+            - {name: files, mountPath: /etc/incident-operator, readOnly: true}
+          readinessProbe:
+            httpGet: {path: /healthz, port: ui}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: webhook}
+            periodSeconds: 30
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: files
+          configMap: {name: incident-operator-files}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: incident-operator
+  labels: {{- toYaml $labels | nindent 4 }}
+spec:
+  selector: {app: incident-operator}
+  ports: [{name: http, port: 80, targetPort: ui}]
+---
+# Alertmanager's webhook target. In-cluster only: no Ingress points here, so the LAN can't inject alerts.
+apiVersion: v1
+kind: Service
+metadata:
+  name: incident-operator-webhook
+  labels: {{- toYaml $labels | nindent 4 }}
+spec:
+  selector: {app: incident-operator}
+  ports: [{name: http, port: 80, targetPort: webhook}]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: incident-operator
+  labels: {{- toYaml $labels | nindent 4 }}
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: {{ .Values.ui.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: incident-operator, port: {name: http}}

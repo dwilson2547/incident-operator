@@ -2,7 +2,7 @@
 
 Env: DATABASE_URL; GPU_SCHEDULER_URL, GPU_SCHEDULER_TOKEN, TRIAGE_MODEL, TRIAGE_FALLBACK,
 TRIAGE_FALLBACK_AFTER_SECONDS (triage.Config); SMTP_* and PUBLIC_URL (notify.SmtpConfig); PRIMER_PATH;
-EVIDENCE=off to skip the Kubernetes reads (local runs without a cluster).
+UI_PORT, WEBHOOK_PORT (8080, 8081); KUBE_API_URL for local runs (`kubectl proxy`); EVIDENCE=off to skip the Kubernetes reads.
 """
 import asyncio
 import contextlib
@@ -44,12 +44,15 @@ def main() -> None:
     smtp = SmtpConfig.from_env()
     logging.info("triage: %s, fallback %s after %ss; email %s", cfg.model, cfg.fallback, cfg.fallback_after_seconds,
                  f"to {', '.join(smtp.to)}" if smtp.usable else "off")
-    k8s = None if os.environ.get("EVIDENCE", "on") == "off" else K8s()
+    # In the cluster: the service account. Locally: KUBE_API_URL, e.g. `kubectl proxy` at http://127.0.0.1:8001.
+    k8s = (None if os.environ.get("EVIDENCE", "on") == "off"
+           else K8s(base=os.environ["KUBE_API_URL"]) if os.environ.get("KUBE_API_URL") else K8s())
     engine = Engine(conn, cfg, k8s, GpuScheduler(cfg), Notifier(smtp) if smtp.usable else None)
     threading.Thread(target=engine.run_forever, name="triage", daemon=True).start()
 
-    servers = [_Server(uvicorn.Config(create_ui_app(url), host="0.0.0.0", port=8080, log_level="warning")),
-               _Server(uvicorn.Config(create_webhook_app(url), host="0.0.0.0", port=8081, log_level="warning"))]
+    ui_port, hook_port = int(os.environ.get("UI_PORT", 8080)), int(os.environ.get("WEBHOOK_PORT", 8081))
+    servers = [_Server(uvicorn.Config(create_ui_app(url), host="0.0.0.0", port=ui_port, log_level="warning")),
+               _Server(uvicorn.Config(create_webhook_app(url), host="0.0.0.0", port=hook_port, log_level="warning"))]
 
     def stop(*_):
         engine.stopping = True

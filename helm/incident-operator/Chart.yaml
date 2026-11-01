@@ -1,0 +1,6 @@
+apiVersion: v2
+name: incident-operator
+description: Alertmanager alerts -> incidents, triaged by a local LLM through gpu-scheduler (suggest-only, phase 1)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

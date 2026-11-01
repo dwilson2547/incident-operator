@@ -662,8 +662,9 @@ After several approved runs where the post-check passed, raising it to `auto` is
 
 ## 14. Phasing
 
-1. **Suggest-only triage.** Webhook intake, incidents, the no-runbook triage (§6.5), needs-runbook list, minimal UI,
-   email. Proves intake and model latency on real alerts.
+1. **Suggest-only triage.** ✅ Built 2026-11-01 (README). Webhook intake, incidents, the no-runbook triage (§6.5)
+   with generic read-only evidence, needs-runbook list, minimal UI, email. The environment primer (§9.4) is in from the
+   start. Checked end to end against the real cluster: two real failed Jobs triaged in 25 s with correct answers.
 2. **Runbooks, precursors and read-only operations.** File loading and validation, precursors, the investigation
    loop, findings, the remediation session as suggestion only, probes, replay. First runbooks: NFS client wedge
    (§12), the scraper failure classes, `KubeJobFailed` for backups.

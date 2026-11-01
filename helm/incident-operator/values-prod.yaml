@@ -1,0 +1,3 @@
+# This instance (home cluster). Deployed by Argo from git with this file layered on values.yaml.
+image:
+  tag: latest

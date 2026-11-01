@@ -1,0 +1,33 @@
+image:
+  repository: dwilson2547/incident-operator
+  tag: latest
+
+# The incident page. LAN-only to start (cluster.local wildcard -> LAN Traefik); authentik and a public host later.
+ui:
+  host: incident-operator.cluster.local
+  publicUrl: http://incident-operator.cluster.local     # used in emails' incident links
+
+triage:
+  gpuSchedulerUrl: http://gpu-scheduler-api.gpu-scheduler.svc
+  model: qwen35-9b
+  fallback: gemma4-26b-a4b                # comma-separated; another model takes the job after fallbackAfterSeconds
+  fallbackAfterSeconds: 60
+  deadlineSeconds: 900
+  maxNewTokens: 1024
+
+smtp:
+  host: smtp.gmail.com
+  port: 587
+  username: dwilson2547@gmail.com
+  from: "incident-operator <dwilson2547@gmail.com>"
+  to: dwilson2547@gmail.com
+
+# Created by scripts/create-secrets.sh.
+secrets:
+  database: incident-operator-db               # DATABASE_URL
+  gpuScheduler: incident-operator-gpu-scheduler   # GPU_SCHEDULER_TOKEN
+  smtp: incident-operator-smtp                 # SMTP_PASSWORD
+
+resources:
+  requests: {cpu: 20m, memory: 96Mi}
+  limits: {memory: 256Mi}
