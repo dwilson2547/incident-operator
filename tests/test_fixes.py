@@ -268,21 +268,15 @@ def test_signed_in_ui_redirects_and_guards_the_api():
     assert c.post("/api/fixes/1/approve", json={}).status_code == 401
 
 
-def test_chart_generates_rbac_from_the_fix_files(tmp_path):
+def test_chart_generates_rbac_from_the_fix_files():
     if not shutil.which("helm"):
         pytest.skip("helm not installed")
-    chart = tmp_path / "incident-operator"
-    shutil.copytree(CHART.parent, chart)
-    (chart / "files" / "operations" / "rerun.yaml").write_text(
-        "name: rerun\ndescription: d\nmutating: true\nparams: {ns: {from: alertLabel:namespace}, cj: {from: "
-        "alertLabel:cronjob}}\nrun: {verb: CreateJobFrom, namespaces: [postgres, offsite-backup], namespace: '{ns}', "
-        "cronjob: '{cj}'}\npost: {settle: 30, checks: [{op: cronjob-history, expect: 'x == 1'}]}\n"
-        "limits: {perTarget: 1/1h, global: 2/24h}\n")
-    out = subprocess.run(["helm", "template", "t", str(chart), "-n", "incident-operator"], capture_output=True,
+    out = subprocess.run(["helm", "template", "t", str(CHART.parent), "-n", "incident-operator"], capture_output=True,
                          text=True, check=True).stdout
     roles = [d for d in out.split("\n---\n") if "kind: Role\n" in d and "incident-operator-fix-" in d]
     assert sorted((r.split("namespace: ")[1].split("\n")[0], "delete" in r, "create" in r) for r in roles) == [
-        ("kube-system", True, False), ("offsite-backup", False, True), ("postgres", False, True)]
+        ("kube-system", True, False), ("offsite-backup", False, True), ("postgres", False, True),
+        ("secrets-backup", False, True)]
 
 
 def _mail_text(e, inc):
