@@ -7,6 +7,8 @@
 #   3. a gpu-scheduler client token "incident-operator": appended to gpu-scheduler-tokens, and the same token in
 #      Secret incident-operator-gpu-scheduler (GPU_SCHEDULER_TOKEN); restarts gpu-scheduler-api to load it
 #   4. the Alertmanager SMTP password copied into Secret incident-operator-smtp (SMTP_PASSWORD)
+#   5. an authentik OIDC client secret for the page: Secret incident-operator-oidc (here) and
+#      authentik-incident-operator-oidc (authentik ns), key client_secret in both; restarts authentik to load it
 # Re-running is safe: each step is skipped when its Secret already exists.
 set -euo pipefail
 NS=incident-operator
@@ -49,6 +51,17 @@ else
   kubectl -n monitoring get secret alertmanager-smtp -o jsonpath='{.data.SMTP_PASSWORD}' | base64 -d \
     | kubectl -n "$NS" create secret generic incident-operator-smtp --from-file=SMTP_PASSWORD=/dev/stdin >/dev/null
   echo "SMTP password copied into incident-operator-smtp"
+fi
+
+if exists "$NS" incident-operator-oidc; then
+  echo "incident-operator-oidc exists: skipping the OIDC client secret"
+else
+  SEC=$(openssl rand -hex 32)
+  printf '%s' "$SEC" | kubectl -n authentik create secret generic authentik-incident-operator-oidc \
+    --from-file=client_secret=/dev/stdin --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  printf '%s' "$SEC" | kubectl -n "$NS" create secret generic incident-operator-oidc --from-file=client_secret=/dev/stdin >/dev/null
+  kubectl -n authentik rollout restart deploy/authentik-server deploy/authentik-worker >/dev/null
+  echo "OIDC client secret written to both Secrets; authentik restarting to load it"
 fi
 
 echo "done:"; kubectl -n "$NS" get secrets
