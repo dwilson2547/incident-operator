@@ -27,7 +27,7 @@ header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; bord
 header h1 { font-size: 15px; margin: 0; font-weight: 600; }
 .spacer { flex: 1; }
 .muted { color: var(--muted); }
-main { padding: 16px; max-width: 1300px; margin: 0 auto; }
+main { padding: 16px; max-width: 1600px; margin: 0 auto; }
 h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); margin: 22px 0 8px; font-weight: 600; }
 h2:first-child { margin-top: 0; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
@@ -42,13 +42,14 @@ tbody tr.click:hover { background: var(--surface-2); }
   background: var(--surface-2); border: 1px solid var(--border); white-space: nowrap; }
 .tag::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--c, var(--muted)); }
 .s-new, .s-triaging { --c: var(--warning); } .s-analysed { --c: var(--good); } .s-triage_failed { --c: var(--critical); }
+.s-repeat, .s-skipped { --c: var(--muted); }
 .sev-critical { --c: var(--critical); } .sev-warning { --c: var(--warning); }
-.preview { color: var(--text-2); max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview { color: var(--text-2); max-width: 0; width: 100%; min-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .empty { padding: 28px; text-align: center; color: var(--muted); }
 .banner { background: color-mix(in srgb, var(--critical) 18%, var(--surface)); border: 1px solid var(--critical);
   padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; }
 .hidden { display: none !important; }
-.grid2 { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; align-items: start; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 12px; align-items: start; }
 @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; font-size: 13px; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; word-break: break-word; }
@@ -85,7 +86,7 @@ const ago = t => t ? dur((Date.now() - new Date(t)) / 1000) + " ago" : "–";
 const clock = t => t ? new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "–";
 const TARGET = ["namespace", "pod", "job_name", "deployment", "statefulset", "daemonset", "node", "instance"];
 const target = l => TARGET.filter(k => l[k]).map(k => `${k}=${l[k]}`).join(" ");
-const STATUS = { new: "new", triaging: "triaging", analysed: "analysed", triage_failed: "triage failed" };
+const STATUS = { new: "new", triaging: "triaging", analysed: "analysed", triage_failed: "triage failed", repeat: "repeat", skipped: "skipped" };
 const state = { lastOk: null };
 const lget = k => { try { return localStorage.getItem("io." + k); } catch { return null; } };
 const lset = (k, v) => { try { localStorage.setItem("io." + k, v); } catch {} };
@@ -121,7 +122,7 @@ async function refresh() {
 function renderList(d) {
   $("#incidents").innerHTML = d.incidents.length ? `<table><thead><tr><th>When</th><th>Alert</th><th>Target</th><th>Status</th><th>Answered by</th><th>Suggestion</th></tr></thead><tbody>
     ${d.incidents.map(i => `<tr class="click" data-id="${i.id}">
-      <td title="${esc(clock(i.first_seen))}" style="white-space:nowrap">${ago(i.first_seen)}${i.alert_resolved_at ? `<div class="muted" style="font-size:12px">resolved</div>` : ""}</td>
+      <td title="${esc(clock(i.first_seen))}" style="white-space:nowrap">${ago(i.first_seen)}${i.alert_resolved_at ? `<div class="muted" style="font-size:12px">resolved</div>` : ""}${i.repeats ? `<div class="muted" style="font-size:12px;white-space:normal;min-width:110px" title="Fired again ${i.repeats}× since; not triaged again">+${i.repeats} repeat${i.repeats > 1 ? "s" : ""}, last ${ago(i.last_repeat)}${i.repeats_open ? " (firing)" : ""}</div>` : ""}</td>
       <td><span class="tag sev-${esc(i.severity || "")}">${esc(i.alertname)}</span></td>
       <td class="muted" style="font-size:12.5px">${esc(target(i.labels)) || "–"}</td>
       <td><span class="tag s-${esc(i.status)}">${esc(STATUS[i.status] || i.status)}</span></td>
@@ -131,7 +132,7 @@ function renderList(d) {
   document.querySelectorAll("#incidents tr.click").forEach(r => r.onclick = () => location.hash = "#/incident/" + r.dataset.id);
   $("#runbooks").innerHTML = d.needs_runbook.length ? `<table><thead><tr><th>Alert</th><th class="n">Incidents</th><th class="n">Open</th><th>Last</th></tr></thead><tbody>
     ${d.needs_runbook.map(r => `<tr><td>${esc(r.alertname)}</td><td class="n">${r.incidents}</td><td class="n">${r.open}</td><td class="muted">${ago(r.last_seen)}</td></tr>`).join("")}</tbody></table>
-    <p class="muted" style="margin:8px 12px;font-size:12px">Alerts that fired with no runbook. A runbook for the most frequent ones gives the model the evidence and context it's missing.</p>`
+    <p class="muted" style="margin:8px 12px;font-size:12px">Counts include repeats. Alerts that fired with no runbook. A runbook for the most frequent ones gives the model the evidence and context it's missing.</p>`
     : `<div class="empty">Nothing yet.</div>`;
 }
 
@@ -152,12 +153,18 @@ function renderIncident(i) {
           ${i.status === "analysed" ? `<div class="answer">${esc(i.analysis)}</div>
               <p class="muted" style="margin:12px 0 0;font-size:12.5px">Answered by <b>${esc(i.analysis_model)}</b> on ${esc(i.analysis_worker || "?")}${turn && turn.ran_model && turn.ran_model !== turn.model ? ` (fallback from ${esc(turn.model)})` : ""} · suggestion only, nothing was changed</p>`
             : i.status === "triage_failed" ? `<div class="err">The model couldn't analyse this: ${esc(i.error || "unknown error")}</div>`
+            : i.status === "repeat" ? `<div>The same problem was triaged recently, so this wasn't triaged or mailed again. See <a href="#/incident/${i.repeat_of}">incident #${i.repeat_of}</a>.</div>`
+            : i.status === "skipped" ? `<div class="muted">${esc(i.error || "Not triaged.")}</div>`
             : `<div class="muted">${i.status === "new" ? "Collecting evidence…" : "Waiting for the model…"} This page refreshes on its own.</div>`}
         </div>
-        <h2>Evidence the model was given</h2>
+        ${i.repeats.length ? `<h2>Fired again since (${i.repeats.length}${i.repeats.length === 100 ? "+" : ""}), not triaged again</h2>
+          <div class="card scroll" style="padding:0"><table><thead><tr><th>#</th><th>Fired</th><th>Target</th><th>Resolved</th></tr></thead><tbody>
+          ${i.repeats.map(r => `<tr><td><a href="#/incident/${r.id}">${r.id}</a></td><td>${clock(r.first_seen)}</td><td class="muted" style="font-size:12.5px">${esc(target(r.labels)) || "–"}</td><td>${r.alert_resolved_at ? clock(r.alert_resolved_at) : "firing"}</td></tr>`).join("")}
+          </tbody></table></div>` : ""}
+        ${i.status === "repeat" || i.status === "skipped" ? "" : `<h2>Evidence the model was given</h2>
         <div class="card">${i.evidence.length ? i.evidence.map(e => `<details ${e.kind === "logs" ? "" : "open"}><summary>${esc(e.source)}${e.truncated ? " <span class='muted'>(truncated)</span>" : ""}</summary>
             ${e.content != null ? `<pre>${esc(e.content)}</pre>` : `<div class="err" style="margin-top:6px">could not read: ${esc(e.error)}</div>`}</details>`).join("")
-          : `<div class="muted">None: the alert names no pod, job, workload or node.</div>`}</div>
+          : `<div class="muted">None: the alert names no pod, job, workload or node.</div>`}</div>`}
         ${turn ? `<h2>Prompt</h2><div class="card"><details><summary>Exactly what was sent (${esc(turn.prompt_version)}, to ${esc(turn.model)}${turn.fallback ? ", fallback " + esc(turn.fallback.join(", ")) : ""})</summary>
             ${msgs.map(m => `<div class="muted" style="margin-top:10px">${esc(m.role)}</div><pre>${esc(m.content)}</pre>`).join("")}</details></div>` : ""}
       </div>
@@ -168,7 +175,7 @@ function renderIncident(i) {
           <dt>Firing since</dt><dd>${clock(i.starts_at || i.first_seen)}</dd>
           <dt>Last sent</dt><dd>${ago(i.last_seen)}</dd>
           <dt>Resolved</dt><dd>${i.alert_resolved_at ? clock(i.alert_resolved_at) : "no"}</dd>
-          <dt>Mailed</dt><dd>${i.notified_at ? clock(i.notified_at) : "not yet"}</dd>
+          <dt>Mailed</dt><dd>${i.notified_at ? clock(i.notified_at) : i.status === "repeat" || i.status === "skipped" ? "no" : "not yet"}</dd>
           <dt>Runbook</dt><dd>${esc(i.runbook || "none yet")}</dd>
           ${Object.entries(ann).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}
           ${Object.entries(i.labels).filter(([k]) => k !== "alertname").map(([k, v]) => `<dt>${esc(k)}</dt><dd class="muted">${esc(v)}</dd>`).join("")}

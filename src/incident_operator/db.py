@@ -3,9 +3,16 @@
 Phase 1 lifecycle: `new` (alert received) -> `triaging` (evidence collected, job submitted) -> `analysed` or
 `triage_failed`; independently, the alert can resolve (`alert_resolved_at`). One open incident per Alertmanager
 fingerprint: re-sends update `last_seen`, a resolve closes it, and the next firing opens a new one.
+
+Two brakes keep a noisy alert from turning into a pile of identical reports (triage.Engine.start_new):
+- `repeat`: an incident whose problem key (problem_key()) was triaged within the repeat window is not triaged or
+  mailed again; it points at that incident (`repeat_of`). Catches flapping and per-run names (CronJob runs, pods).
+- `skipped`: over the hourly triage cap, incidents wait; one that resolved long before its turn is dropped.
 """
 from __future__ import annotations
 
+import json
+import re
 from datetime import datetime
 
 import psycopg
@@ -22,7 +29,7 @@ CREATE TABLE IF NOT EXISTS incidents (
     annotations        jsonb NOT NULL,
     generator_url      text,
     status             text NOT NULL DEFAULT 'new'
-                       CHECK (status IN ('new', 'triaging', 'analysed', 'triage_failed')),
+                       CHECK (status IN ('new', 'triaging', 'analysed', 'triage_failed', 'repeat', 'skipped')),
     runbook            text,                       -- none in phase 1: every incident needs one
     starts_at          timestamptz,
     first_seen         timestamptz NOT NULL DEFAULT now(),
@@ -38,6 +45,14 @@ CREATE TABLE IF NOT EXISTS incidents (
 CREATE UNIQUE INDEX IF NOT EXISTS incidents_open_fingerprint ON incidents (fingerprint) WHERE alert_resolved_at IS NULL;
 CREATE INDEX IF NOT EXISTS incidents_status ON incidents (status) WHERE status IN ('new', 'triaging');
 CREATE INDEX IF NOT EXISTS incidents_first_seen ON incidents (first_seen DESC);
+-- Added after the first release: repeats and skips.
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS problem_key text;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS repeat_of bigint REFERENCES incidents (id);
+ALTER TABLE incidents DROP CONSTRAINT IF EXISTS incidents_status_check;
+ALTER TABLE incidents ADD CONSTRAINT incidents_status_check
+    CHECK (status IN ('new', 'triaging', 'analysed', 'triage_failed', 'repeat', 'skipped'));
+CREATE INDEX IF NOT EXISTS incidents_problem_key ON incidents (problem_key, first_seen DESC);
+CREATE INDEX IF NOT EXISTS incidents_repeat_of ON incidents (repeat_of) WHERE repeat_of IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS evidence (
     id            bigserial PRIMARY KEY,
@@ -86,19 +101,50 @@ def migrate(conn: psycopg.Connection) -> None:
 
 # -- intake ------------------------------------------------------------------------------------------------------------
 
+# A trailing name segment Kubernetes or a controller generated: a number (CronJob schedule time, Job attempt,
+# StatefulSet ordinal) or a 5-10 character hash with a digit in it (ReplicaSet hash, pod suffix).
+_GENERATED = re.compile(r"-(?:\d+|(?=[a-z0-9]*\d)[a-z0-9]{5,10})$")
+# Labels that change from one occurrence of the same problem to the next.
+_VOLATILE = {"uid", "pod_ip", "container_id", "prometheus"}
+
+
+def stem(name: str) -> str:
+    """`offsite-objects-29886270-4rg6q` -> `offsite-objects`, `parts-direct-mercedes-20261031212238-2` ->
+    `parts-direct-mercedes`, `gpu-scheduler-api-7b5d7788dc-x6fps` -> `gpu-scheduler-api`."""
+    prev = None
+    while prev != name:
+        prev, name = name, _GENERATED.sub("", name)
+    return name
+
+
+def problem_key(labels: dict) -> str:
+    """What makes two alerts "the same problem": the labels, with pod and Job names reduced to their stems and the
+    per-occurrence labels dropped. (`instance` is dropped when something else names the target: for pod and Job
+    alerts it is kube-state-metrics' own address.)"""
+    key = {k: v for k, v in labels.items() if k not in _VOLATILE}
+    for k in ("pod", "job_name"):
+        if k in key:
+            key[k] = stem(key[k])
+    if any(k in key for k in ("pod", "job_name", "deployment", "statefulset", "daemonset", "node")):
+        key.pop("instance", None)
+    return json.dumps(key, sort_keys=True, separators=(",", ":"))
+
+
 def record_firing(conn: psycopg.Connection, alert: dict) -> tuple[int, bool]:
     """Open an incident for a firing alert, or touch the open one with its fingerprint. Returns (id, created)."""
     labels = alert.get("labels") or {}
     row = conn.execute(
         """
-        INSERT INTO incidents (fingerprint, alertname, severity, labels, annotations, generator_url, starts_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO incidents (fingerprint, alertname, severity, labels, annotations, generator_url, starts_at,
+                               problem_key)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (fingerprint) WHERE alert_resolved_at IS NULL
         DO UPDATE SET last_seen = now(), annotations = EXCLUDED.annotations
         RETURNING id, (xmax = 0) AS created
         """,
         (alert["fingerprint"], labels.get("alertname", "unknown"), labels.get("severity"), Jsonb(labels),
-         Jsonb(alert.get("annotations") or {}), alert.get("generatorURL"), _ts(alert.get("startsAt"))),
+         Jsonb(alert.get("annotations") or {}), alert.get("generatorURL"), _ts(alert.get("startsAt")),
+         problem_key(labels)),
     ).fetchone()
     return row["id"], row["created"]
 
@@ -120,6 +166,27 @@ def _ts(value: str | None) -> datetime | None:
 
 
 # -- triage ------------------------------------------------------------------------------------------------------------
+
+def last_triaged(conn: psycopg.Connection, key: str | None, within_seconds: int, exclude_id: int) -> int | None:
+    """The newest incident with this problem key that was sent to the model within the window, if any."""
+    if key is None:
+        return None
+    row = conn.execute(
+        """
+        SELECT id FROM incidents
+        WHERE problem_key = %s AND id <> %s AND status IN ('triaging', 'analysed', 'triage_failed')
+          AND first_seen > now() - make_interval(secs => %s)
+        ORDER BY first_seen DESC LIMIT 1
+        """,
+        (key, exclude_id, within_seconds),
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def triages_since(conn: psycopg.Connection, seconds: int) -> int:
+    return conn.execute("SELECT count(*) AS n FROM model_turns WHERE submitted_at > now() - make_interval(secs => %s)",
+                        (seconds,)).fetchone()["n"]
+
 
 def incidents_with_status(conn: psycopg.Connection, status: str, limit: int = 20) -> list[dict]:
     return conn.execute("SELECT * FROM incidents WHERE status = %s ORDER BY first_seen LIMIT %s",
@@ -179,9 +246,17 @@ def mark_notified(conn: psycopg.Connection, incident_id: int) -> None:
 def list_incidents(conn: psycopg.Connection, limit: int = 200) -> list[dict]:
     return conn.execute(
         """
-        SELECT id, fingerprint, alertname, severity, labels, status, runbook, first_seen, last_seen, alert_resolved_at,
-               analysis_model, analysis_worker, notified_at, left(analysis, 300) AS analysis_preview
-        FROM incidents ORDER BY first_seen DESC LIMIT %s
+        SELECT i.id, i.fingerprint, i.alertname, i.severity, i.labels, i.status, i.runbook, i.first_seen, i.last_seen,
+               i.alert_resolved_at, i.analysis_model, i.analysis_worker, i.notified_at,
+               left(i.analysis, 300) AS analysis_preview,
+               r.n AS repeats, r.open AS repeats_open, r.last AS last_repeat
+        FROM incidents i
+        LEFT JOIN LATERAL (
+            SELECT count(*) AS n, count(*) FILTER (WHERE alert_resolved_at IS NULL) AS open, max(first_seen) AS last
+            FROM incidents WHERE repeat_of = i.id
+        ) r ON true
+        WHERE i.status <> 'repeat'                     -- shown folded under the incident they repeat
+        ORDER BY greatest(i.first_seen, r.last) DESC LIMIT %s
         """,
         (limit,),
     ).fetchall()
@@ -195,6 +270,9 @@ def get_incident(conn: psycopg.Connection, incident_id: int) -> dict | None:
                                    (incident_id,)).fetchall()
     inc["turns"] = conn.execute("SELECT * FROM model_turns WHERE incident_id = %s ORDER BY id",
                                 (incident_id,)).fetchall()
+    inc["repeats"] = conn.execute(
+        "SELECT id, labels, first_seen, last_seen, alert_resolved_at FROM incidents WHERE repeat_of = %s"
+        " ORDER BY first_seen DESC LIMIT 100", (incident_id,)).fetchall()
     return inc
 
 

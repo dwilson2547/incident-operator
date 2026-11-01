@@ -76,6 +76,9 @@ spec:
             - {name: TRIAGE_FALLBACK_AFTER_SECONDS, value: {{ .Values.triage.fallbackAfterSeconds | quote }}}
             - {name: TRIAGE_DEADLINE_SECONDS, value: {{ .Values.triage.deadlineSeconds | quote }}}
             - {name: TRIAGE_MAX_NEW_TOKENS, value: {{ .Values.triage.maxNewTokens | quote }}}
+            - {name: TRIAGE_REPEAT_WINDOW_SECONDS, value: {{ .Values.triage.repeatWindowSeconds | quote }}}
+            - {name: TRIAGE_MAX_PER_HOUR, value: {{ .Values.triage.maxPerHour | quote }}}
+            - {name: TRIAGE_SKIP_RESOLVED_AFTER_SECONDS, value: {{ .Values.triage.skipResolvedAfterSeconds | quote }}}
             - {name: PRIMER_PATH, value: /etc/incident-operator/primer.md}
             - {name: SMTP_HOST, value: {{ .Values.smtp.host | quote }}}
             - {name: SMTP_PORT, value: {{ .Values.smtp.port | quote }}}

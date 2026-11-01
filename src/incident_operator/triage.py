@@ -14,6 +14,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import db, evidence
@@ -40,6 +41,9 @@ class Config:
     deadline_seconds: int = 900
     max_new_tokens: int = 1024
     primer_path: str = "/etc/incident-operator/primer.md"
+    repeat_window_seconds: int = 6 * 3600      # same problem key triaged this recently -> `repeat`, no new report
+    max_per_hour: int = 12                     # triage submissions; the rest wait
+    skip_resolved_after_seconds: int = 3600    # a waiting incident resolved this long ago -> `skipped`
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -50,7 +54,11 @@ class Config:
                    fallback_after_seconds=int(e.get("TRIAGE_FALLBACK_AFTER_SECONDS", cls.fallback_after_seconds)),
                    deadline_seconds=int(e.get("TRIAGE_DEADLINE_SECONDS", cls.deadline_seconds)),
                    max_new_tokens=int(e.get("TRIAGE_MAX_NEW_TOKENS", cls.max_new_tokens)),
-                   primer_path=e.get("PRIMER_PATH", cls.primer_path))
+                   primer_path=e.get("PRIMER_PATH", cls.primer_path),
+                   repeat_window_seconds=int(e.get("TRIAGE_REPEAT_WINDOW_SECONDS", cls.repeat_window_seconds)),
+                   max_per_hour=int(e.get("TRIAGE_MAX_PER_HOUR", cls.max_per_hour)),
+                   skip_resolved_after_seconds=int(e.get("TRIAGE_SKIP_RESOLVED_AFTER_SECONDS",
+                                                         cls.skip_resolved_after_seconds)))
 
     def primer(self) -> str:
         """The environment primer (design §9.4): read on every use, so a ConfigMap update needs no restart."""
@@ -108,7 +116,23 @@ class Engine:
 
     def start_new(self) -> int:
         n = 0
-        for inc in db.incidents_with_status(self.conn, "new"):
+        budget = self.cfg.max_per_hour - db.triages_since(self.conn, 3600)
+        for inc in db.incidents_with_status(self.conn, "new", limit=200):
+            prev = db.last_triaged(self.conn, inc["problem_key"], self.cfg.repeat_window_seconds, inc["id"])
+            if prev:
+                db.set_status(self.conn, inc["id"], "repeat", repeat_of=prev)
+                log.info("incident %s (%s): repeat of %s, not triaged", inc["id"], inc["alertname"], prev)
+                n += 1
+                continue
+            resolved = inc["alert_resolved_at"]
+            if resolved and (datetime.now(timezone.utc) - resolved).total_seconds() > self.cfg.skip_resolved_after_seconds:
+                db.set_status(self.conn, inc["id"], "skipped",
+                              error="Resolved before its turn: the hourly triage limit was reached.")
+                log.info("incident %s (%s): skipped, resolved while waiting", inc["id"], inc["alertname"])
+                n += 1
+                continue
+            if budget <= 0:                           # waits for the next pass with room
+                continue
             items = evidence.collect(self.k8s, inc["labels"]) if self.k8s else []
             for it in items:
                 db.add_evidence(self.conn, inc["id"], it.kind, it.source, it.content, it.truncated, it.error)
@@ -122,6 +146,7 @@ class Engine:
             db.add_turn(self.conn, inc["id"], session="triage", prompt_version=PROMPT_VERSION, model=self.cfg.model,
                         fallback=self.cfg.fallback or None, messages=messages, gpu_job_id=job_id)
             db.set_status(self.conn, inc["id"], "triaging")
+            budget -= 1
             log.info("incident %s (%s): %d evidence items, job %s", inc["id"], inc["alertname"], len(items), job_id)
             n += 1
         return n

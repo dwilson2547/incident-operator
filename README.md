@@ -21,8 +21,15 @@ The model picks and explains; code decides what can run. Design: [`docs/design.m
 3. **Triage:** one call to gpu-scheduler with the system prompt, the environment primer
    (`helm/incident-operator/files/primer.md`, mounted, read on every call) and the evidence. `qwen35-9b` on the
    3080, with `gemma4-26b-a4b` on the Mac as fallback after 60 s. Every prompt is stored as sent.
-4. **Email**, one per incident, with the answer, which model and machine answered, the evidence list and a link.
-5. **Page** at http://incident-operator.cluster.local (LAN): incidents, each one's answer, evidence and exact prompt,
+4. **Brakes** against a noisy alert, before any evidence or model call:
+   - **Repeats:** each incident gets a problem key: its labels, with pod and Job names cut to their stem
+     (`offsite-objects-29886270-4rg6q` → `offsite-objects`) and per-occurrence labels dropped. If the same key was
+     triaged in the last 6 h, the incident is a `repeat` of that one: no model call, no email, shown folded under it.
+     Covers flapping alerts and failures that recur under new names (CronJob runs, recreated pods).
+   - **Hourly cap:** at most 12 triage calls an hour; the rest wait, oldest first. One that resolved over an hour
+     before its turn is `skipped`, so a storm doesn't become hours of late emails.
+5. **Email**, one per incident, with the answer, which model and machine answered, the evidence list and a link.
+6. **Page** at http://incident-operator.cluster.local (LAN): incidents, each one's answer, evidence and exact prompt,
    and "needs a runbook": alerts that fired with no runbook (all of them, in phase 1).
 
 Checked end to end on 2026-11-01 against the real cluster and gpu-scheduler: two real failed Jobs (an OOMKilled
@@ -49,6 +56,7 @@ answers found the right container, exit code and log line.
 | `GPU_SCHEDULER_URL`, `GPU_SCHEDULER_TOKEN` | gpu-scheduler API and this client's token |
 | `TRIAGE_MODEL`, `TRIAGE_FALLBACK`, `TRIAGE_FALLBACK_AFTER_SECONDS` | `qwen35-9b`, `gemma4-26b-a4b`, 60 |
 | `TRIAGE_DEADLINE_SECONDS`, `TRIAGE_MAX_NEW_TOKENS` | 900, 1024 |
+| `TRIAGE_REPEAT_WINDOW_SECONDS`, `TRIAGE_MAX_PER_HOUR`, `TRIAGE_SKIP_RESOLVED_AFTER_SECONDS` | 21600, 12, 3600 |
 | `PRIMER_PATH` | the primer file (the chart mounts it at `/etc/incident-operator/primer.md`) |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_TO`, `PUBLIC_URL` | email; off unless host, from and to are set |
 | `UI_PORT`, `WEBHOOK_PORT` | 8080, 8081 |

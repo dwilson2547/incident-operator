@@ -169,3 +169,81 @@ def test_webhook_and_ui_apps(conn):
         assert ui.get("/api/incidents/99999").status_code == 404
         assert "<title>Incidents</title>" in ui.get("/").text
         assert ui.post("/alertmanager", json=payload).status_code in (404, 405)    # not on the UI's port
+
+
+# -- brakes: repeats and the hourly cap -----------------------------------------------------------------------------
+
+def test_problem_key_ignores_generated_names():
+    a = db.problem_key({"alertname": "KubeJobFailed", "namespace": "n", "job_name": "backup-29886270",
+                        "instance": "10.1.2.3:8080", "uid": "u1"})
+    b = db.problem_key({"alertname": "KubeJobFailed", "namespace": "n", "job_name": "backup-29886271",
+                        "instance": "10.1.9.9:8080", "uid": "u2"})
+    assert a == b
+    assert a != db.problem_key({"alertname": "KubeJobFailed", "namespace": "n", "job_name": "restore-29886270"})
+    node = {"alertname": "NodeMemoryHighUtilization", "instance": "192.168.0.36:9100"}
+    assert db.problem_key(node) != db.problem_key({**node, "instance": "192.168.0.37:9100"})
+
+
+def test_flapping_alert_is_triaged_and_mailed_once(conn, tmp_path):
+    gpu, mail = FakeGpu(), Mailbox()
+    e = engine(conn, gpu, mail, tmp_path)
+    first, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
+    e.step(); gpu.finish(); e.step()
+    for _ in range(5):                                                            # resolve, fire, resolve, ...
+        db.record_resolved(conn, alert(status="resolved"))
+        db.record_firing(conn, alert(namespace="gyopart", pod="x"))
+        e.step()
+    assert len(gpu.submitted) == 1 and len(mail.sent) == 1
+    with TestClient(create_ui_app(URL)) as ui:
+        d = ui.get("/api/incidents").json()
+    assert [(i["id"], i["repeats"], i["repeats_open"]) for i in d["incidents"]] == [(first, 5, 1)]
+    assert len(db.get_incident(conn, first)["repeats"]) == 5
+
+
+def test_cronjob_runs_under_new_names_are_repeats(conn, tmp_path):
+    gpu, mail = FakeGpu(), Mailbox()
+    e = engine(conn, gpu, mail, tmp_path)
+    first, _ = db.record_firing(conn, alert("r1", namespace="gyopart", job_name="backup-29886270"))
+    e.step()
+    second, _ = db.record_firing(conn, alert("r2", namespace="gyopart", job_name="backup-29886271"))
+    e.step()
+    inc = db.get_incident(conn, second)
+    assert (inc["status"], inc["repeat_of"]) == ("repeat", first) and len(gpu.submitted) == 1
+
+
+def test_after_the_window_it_is_triaged_again(conn, tmp_path):
+    gpu, mail = FakeGpu(), Mailbox()
+    e = engine(conn, gpu, mail, tmp_path)
+    first, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
+    e.step()
+    conn.execute("UPDATE incidents SET first_seen = now() - interval '7 hours' WHERE id = %s", (first,))
+    db.record_resolved(conn, alert(status="resolved"))
+    db.record_firing(conn, alert(namespace="gyopart", pod="x"))
+    e.step()
+    assert len(gpu.submitted) == 2
+
+
+def test_hourly_cap_holds_the_rest_and_skips_long_resolved(conn, tmp_path):
+    gpu, mail = FakeGpu(), Mailbox()
+    e = engine(conn, gpu, mail, tmp_path)
+    e.cfg.max_per_hour = 2
+    ids = [db.record_firing(conn, alert(f"s{k}", namespace="gyopart", pod=f"app{k}-x"))[0] for k in range(4)]
+    e.step()
+    assert [db.get_incident(conn, i)["status"] for i in ids] == ["triaging", "triaging", "new", "new"]
+    # one waiting incident resolves long before there is room again: dropped, the other still waits
+    conn.execute("UPDATE incidents SET alert_resolved_at = now() - interval '2 hours' WHERE id = %s", (ids[2],))
+    e.step()
+    assert [db.get_incident(conn, i)["status"] for i in ids[2:]] == ["skipped", "new"]
+    conn.execute("UPDATE model_turns SET submitted_at = now() - interval '2 hours'")    # the hour passes
+    e.step()
+    assert db.get_incident(conn, ids[3])["status"] == "triaging" and len(gpu.submitted) == 3
+
+
+def test_migrates_a_phase_1_database(conn):
+    conn.execute("DROP TABLE evidence, model_turns, incidents")
+    old = db.SCHEMA.split("-- Added after the first release")[0].replace(", 'repeat', 'skipped'", "")
+    conn.execute(old)
+    conn.execute("INSERT INTO incidents (fingerprint, alertname, labels, annotations) VALUES ('f', 'A', '{}', '{}')")
+    db.migrate(conn)
+    db.migrate(conn)                                                               # and again: idempotent
+    conn.execute("UPDATE incidents SET status = 'repeat'")
