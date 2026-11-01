@@ -2,10 +2,15 @@ image:
   repository: dwilson2547/incident-operator
   tag: latest
 
-# The incident page. LAN-only to start (cluster.local wildcard -> LAN Traefik); authentik and a public host later.
+# The incident page. LAN-only (cluster.local wildcard -> LAN Traefik). With oidc.issuer set, every page needs an
+# authentik sign-in and only signed-in users can approve fixes; without it the page is open and fixes can't be approved.
 ui:
   host: incident-operator.cluster.local
-  publicUrl: http://incident-operator.cluster.local     # used in emails' incident links
+  publicUrl: http://incident-operator.cluster.local     # email links, and the sign-in callback's base
+  oidc:
+    issuer: ""                 # e.g. https://auth.danwils.com/application/o/incident-operator/
+    clientId: incident-operator
+    secret: ""                 # hand-applied Secret with key client_secret (the same value as authentik's copy)
 
 triage:
   gpuSchedulerUrl: http://gpu-scheduler-api.gpu-scheduler.svc
@@ -39,3 +44,7 @@ secrets:
 resources:
   requests: {cpu: 20m, memory: 96Mi}
   limits: {memory: 256Mi}
+
+executorResources:
+  requests: {cpu: 5m, memory: 48Mi}
+  limits: {memory: 128Mi}

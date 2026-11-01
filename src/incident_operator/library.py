@@ -8,7 +8,10 @@ A runbook's frontmatter is what code uses (match, target, precursors, operations
 An operation's revision is the hash of its file, a runbook's the hash of its file plus those of the operations it
 names, so an incident records exactly what it ran with (design §8.2).
 
-Phase 2a: read-only operations only. A `mutating: true` operation is rejected until the executor exists (phase 3).
+Mutating operations (phase 3, design §7) are the same format with `mutating: true`, a `run.verb` from the executor's
+fixed set, `pre` and `post` checks (read-only operations with an expectation each), `limits`, and an `autonomy`. A
+runbook offers them in its `operations` list, optionally raising the autonomy: `{restart-csi-nfs-node: {autonomy:
+approve}}`. They never appear on the investigation's menu; only the remediation step can propose one.
 """
 from __future__ import annotations
 
@@ -29,10 +32,21 @@ READ_KINDS = {"alert-objects", "k8s-summary", "k8s-get", "k8s-events", "k8s-logs
 TARGET_KINDS = {"Pod", "Job", "Deployment", "StatefulSet", "DaemonSet", "Node", "ScrapeJob"}
 PARAM_SOURCE = re.compile(r"^(target\.(name|namespace|kind)|alertLabel:[A-Za-z_][A-Za-z0-9_]*|result:[a-z0-9-]+\.[\w.]+)$")
 NAME = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+VERBS = {"DeletePods", "CreateJobFrom"}            # executor.py; the set grows by code change (design §7.2)
+AUTONOMY = ("suggest", "approve")                  # `auto` is phase 4
+# An expectation on a check's structured result: `<path> <op> <literal>`, e.g. `mount_nfs_dstate_total == 0`.
+EXPECT = re.compile(r"^\s*([\w.]+)\s*(==|!=|>=|<=|>|<)\s*(-?\d+(?:\.\d+)?|true|false|null|\"[^\"]*\")\s*$")
+LIMIT = re.compile(r"^(\d+)/(\d+)([mhd])$")
 
 
 def tokens(text: str) -> int:
     return (len(text) + 3) // 4
+
+
+@dataclass
+class Check:
+    op: str
+    expect: str
 
 
 @dataclass
@@ -44,6 +58,12 @@ class Operation:
     budget_chars: int
     rev: str
     path: str
+    mutating: bool = False
+    autonomy: str = "suggest"
+    pre: list[Check] = field(default_factory=list)
+    post: list[Check] = field(default_factory=list)
+    settle_seconds: int = 0
+    limits: dict[str, tuple[int, int]] = field(default_factory=dict)    # perTarget / global -> (runs, seconds)
 
 
 @dataclass
@@ -59,6 +79,7 @@ class Runbook:
     rev: str
     path: str
     warnings: list[str] = field(default_factory=list)
+    fixes: dict[str, str] = field(default_factory=dict)    # mutating operation -> effective autonomy
 
     def section(self, heading: str) -> str | None:
         """The text under `## <heading>` up to the next `## `, or None."""
@@ -97,15 +118,18 @@ def parse_operation(path: Path) -> Operation:
         raise LoadError("name must be lowercase letters, digits and dashes")
     if name != path.stem:
         raise LoadError(f"name {name!r} must match the file name {path.stem!r}")
-    if d.get("mutating"):
-        raise LoadError("mutating operations need the executor (phase 3); only read-only operations load for now")
     desc = d.get("description")
     if not isinstance(desc, str) or not desc.strip():
         raise LoadError("description is required: the model chooses from it")
     if tokens(desc) > DESCRIPTION_MAX:
         raise LoadError(f"description is ~{tokens(desc)} tokens, over {DESCRIPTION_MAX}")
     run = d.get("run")
-    if not isinstance(run, dict) or run.get("kind") not in READ_KINDS:
+    mutating = bool(d.get("mutating"))
+    if not isinstance(run, dict):
+        raise LoadError("run is required")
+    if mutating and run.get("verb") not in VERBS:
+        raise LoadError(f"a mutating operation's run.verb must be one of {sorted(VERBS)}")
+    if not mutating and run.get("kind") not in READ_KINDS:
         raise LoadError(f"run.kind must be one of {sorted(READ_KINDS)}")
     params = d.get("params") or {}
     if not isinstance(params, dict):
@@ -115,12 +139,77 @@ def parse_operation(path: Path) -> Operation:
         if not isinstance(src, str) or not PARAM_SOURCE.match(src):
             raise LoadError(f"param {p}: from must be target.name|namespace|kind, alertLabel:<label> or "
                             "result:<operation>.<path>")
-    _check_run(run, set(params))
     budget = (d.get("budget") or {}).get("maxChars", 3000)
     if not isinstance(budget, int) or not 200 <= budget <= 8000:
         raise LoadError("budget.maxChars must be 200..8000")
-    return Operation(name=name, description=" ".join(desc.split()), params=params, run=run, budget_chars=budget,
-                     rev=_hash(raw), path=str(path))
+    op = Operation(name=name, description=" ".join(desc.split()), params=params, run=run, budget_chars=budget,
+                   rev=_hash(raw), path=str(path), mutating=mutating)
+    if mutating:
+        _check_mutating(op, d, set(params))
+    else:
+        if any(d.get(k) for k in ("pre", "post", "limits", "autonomy")):
+            raise LoadError("pre, post, limits and autonomy are for mutating operations")
+        _check_run(run, set(params))
+    return op
+
+
+def _checks(items, where: str) -> list[Check]:
+    if not isinstance(items, list) or not items:
+        raise LoadError(f"{where} must list checks: - {{op: <read-only operation>, expect: \"<path> == <value>\"}}")
+    out = []
+    for c in items:
+        if not isinstance(c, dict) or not isinstance(c.get("op"), str) or not isinstance(c.get("expect"), str):
+            raise LoadError(f"{where}: each check needs op and expect")
+        if not EXPECT.match(c["expect"]):
+            raise LoadError(f"{where}: expect {c['expect']!r} must be `<path> <==|!=|>|>=|<|<=> <number|true|false|"
+                            "null|\"text\">`")
+        out.append(Check(c["op"], c["expect"]))
+    return out
+
+
+def _check_mutating(op: Operation, d: dict, params: set[str]) -> None:
+    """design §4.2 and §7. The executor's RBAC is generated from these files, so what a verb may touch must be
+    visible here: the namespaces are listed, never only templated."""
+    run = op.run
+    if any(spec["from"].startswith("result:") for spec in op.params.values()):
+        raise LoadError("a fix's params come from target.* or alertLabel: only, never from check results")
+    used = set(re.findall(r"\{(\w+)\}", yaml.safe_dump(run)))
+    if unknown := used - params:
+        raise LoadError(f"run uses {sorted(unknown)} but params doesn't define them")
+    nss = run.get("namespaces")
+    if not isinstance(nss, list) or not nss or not all(isinstance(n, str) and NAME.match(n) for n in nss):
+        raise LoadError("run.namespaces must list the namespaces this operation may act in (its RBAC is made from it)")
+    ns = run.get("namespace")
+    if not isinstance(ns, str) or ("{" not in ns and ns not in nss):
+        raise LoadError("run.namespace must be one of run.namespaces, or a {param} checked against them")
+    if run["verb"] == "DeletePods":
+        sel = run.get("selector")
+        if not isinstance(sel, dict) or not sel:
+            raise LoadError("DeletePods needs a label selector (never every pod in a namespace)")
+        if not isinstance(run.get("maxPods", 1), int) or not 1 <= run.get("maxPods", 1) <= 5:
+            raise LoadError("DeletePods maxPods must be 1..5")
+    elif run["verb"] == "CreateJobFrom":
+        if not isinstance(run.get("cronjob"), str):
+            raise LoadError("CreateJobFrom needs cronjob")
+    op.autonomy = d.get("autonomy", "suggest")
+    if op.autonomy not in AUTONOMY:
+        raise LoadError(f"autonomy must be one of {AUTONOMY} (auto comes later)")
+    op.pre = _checks(d["pre"], "pre") if d.get("pre") is not None else []
+    post = d.get("post")
+    if not isinstance(post, dict):
+        raise LoadError("post is required: {settle: <seconds>, checks: [...]}; a fix nobody verifies isn't one")
+    op.post = _checks(post.get("checks"), "post.checks")
+    op.settle_seconds = post.get("settle", 60)
+    if not isinstance(op.settle_seconds, int) or not 0 <= op.settle_seconds <= 3600:
+        raise LoadError("post.settle must be 0..3600 seconds")
+    limits = d.get("limits")
+    if not isinstance(limits, dict) or not {"perTarget", "global"} <= set(limits):
+        raise LoadError("limits needs perTarget and global, e.g. {perTarget: 1/1h, global: 3/24h}")
+    for k in ("perTarget", "global"):
+        m = LIMIT.match(str(limits[k]))
+        if not m:
+            raise LoadError(f"limits.{k} must look like 1/1h, 3/24h or 2/30m")
+        op.limits[k] = (int(m.group(1)), int(m.group(2)) * {"m": 60, "h": 3600, "d": 86400}[m.group(3)])
 
 
 def _check_run(run: dict, params: set[str]) -> None:
@@ -197,13 +286,33 @@ def parse_runbook(path: Path, operations: dict[str, Operation]) -> Runbook:
             raise LoadError("target.from can only be instanceToNode; otherwise name the labels with name/namespace")
         if not target.get("from") and not target.get("name"):
             raise LoadError("target needs from: instanceToNode, or name: <label> (and namespace: <label>)")
-    pre, ops = d.get("precursors") or [], d.get("operations") or []
-    for field_name, names in (("precursors", pre), ("operations", ops)):
+    pre, ops, fixes = d.get("precursors") or [], [], {}
+    for entry in d.get("operations") or []:            # a name, or {name: {autonomy: approve}} for a fix
+        if isinstance(entry, dict) and len(entry) == 1:
+            (n, opts), = entry.items()
+            if not isinstance(opts, dict) or set(opts) - {"autonomy"}:
+                raise LoadError(f"operations: {n} takes only {{autonomy: ...}}")
+            if n in operations and not operations[n].mutating:
+                raise LoadError(f"operations: {n} is read-only; autonomy is for mutating operations")
+            if opts.get("autonomy") not in (None, *AUTONOMY):
+                raise LoadError(f"operations: {n} autonomy must be one of {AUTONOMY}")
+            fixes[n] = opts.get("autonomy")
+        elif isinstance(entry, str):
+            ops.append(entry)
+        else:
+            raise LoadError("operations entries are names, or {name: {autonomy: ...}}")
+    for field_name, names in (("precursors", pre), ("operations", ops + list(fixes))):
         if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
             raise LoadError(f"{field_name} must be a list of operation names")
         if missing := [n for n in names if n not in operations]:
             raise LoadError(f"{field_name} names operations that aren't loaded: {missing}")
-    for n in set(pre) | set(ops):
+    if bad := [n for n in pre if operations[n].mutating]:
+        raise LoadError(f"precursors must be read-only: {bad}")
+    for n in [o for o in ops if operations[o].mutating]:            # listed plainly: a fix at its own autonomy
+        ops.remove(n)
+        fixes[n] = None
+    fixes = {n: a or operations[n].autonomy for n, a in fixes.items()}
+    for n in set(pre) | set(ops) | set(fixes):
         if any(p["from"].startswith("target.") for p in operations[n].params.values()) and target is None:
             raise LoadError(f"operation {n} needs a target, and this runbook has none")
     # sizes (design §4.1)
@@ -215,10 +324,10 @@ def parse_runbook(path: Path, operations: dict[str, Operation]) -> Runbook:
     if tokens(body) > BODY_WARN:
         warnings.append(f"body is ~{tokens(body)} tokens (over {BODY_WARN})")
     rb = Runbook(name=name, description=desc, match=match, priority=int(d.get("priority", 0)), target=target,
-                 precursors=pre, operations=ops, body=body, rev="", path=str(path), warnings=warnings)
+                 precursors=pre, operations=ops, body=body, rev="", path=str(path), warnings=warnings, fixes=fixes)
     if (rem := rb.section("Remediation")) and tokens(rem) > REMEDIATION_MAX:
         raise LoadError(f"## Remediation is ~{tokens(rem)} tokens, over {REMEDIATION_MAX}")
-    used = sorted(set(pre) | set(ops))
+    used = sorted(set(pre) | set(ops) | set(fixes))
     rb.rev = _hash(raw + "".join(operations[n].rev for n in used).encode())
     return rb
 
@@ -256,6 +365,16 @@ class Library:
                 errors[f"operations/{p.name}"] = str(e)
                 if p.stem in self.operations:                   # the last good version stays live
                     ops[p.stem] = self.operations[p.stem]
+        def bad_checks(op: Operation) -> list[str]:     # a fix's checks must be loaded read-only operations
+            return [c.op for c in op.pre + op.post if c.op not in ops or ops[c.op].mutating]
+        for op in [o for o in ops.values() if o.mutating]:
+            if bad := bad_checks(op):
+                errors[f"operations/{Path(op.path).name}"] = f"pre/post checks name unknown or mutating operations: {bad}"
+                old = self.operations.get(op.name)
+                if old and old.mutating and not bad_checks(old):
+                    ops[op.name] = old
+                else:
+                    del ops[op.name]
         rbs: dict[str, Runbook] = {}
         for p in self._files(self.runbooks_dir, "*.md"):
             try:
@@ -264,7 +383,7 @@ class Library:
             except (LoadError, OSError, UnicodeDecodeError) as e:
                 errors[f"runbooks/{p.name}"] = str(e)
                 old = self.runbooks.get(p.stem)
-                if old and all(n in ops for n in old.precursors + old.operations):
+                if old and all(n in ops for n in old.precursors + old.operations + list(old.fixes)):
                     rbs[p.stem] = old
         self.operations, self.runbooks, self.errors = ops, rbs, errors
         log.info("library: %d runbooks, %d operations, %d rejected%s", len(rbs), len(ops), len(errors),
@@ -280,9 +399,15 @@ class Library:
         return {
             "runbooks": [{"name": r.name, "description": r.description, "match": r.match, "priority": r.priority,
                           "target": r.target, "precursors": r.precursors, "operations": r.operations, "rev": r.rev,
-                          "warnings": r.warnings, "tokens": tokens(r.body)}
+                          "fixes": r.fixes, "warnings": r.warnings, "tokens": tokens(r.body)}
                          for r in sorted(self.runbooks.values(), key=lambda r: r.name)],
-            "operations": [{"name": o.name, "description": o.description, "kind": o.run["kind"], "rev": o.rev}
+            "operations": [{"name": o.name, "description": o.description, "rev": o.rev, "mutating": o.mutating,
+                            "kind": o.run.get("verb") if o.mutating else o.run["kind"],
+                            **({"autonomy": o.autonomy, "pre": [vars(c) for c in o.pre],
+                                "post": [vars(c) for c in o.post], "settle_seconds": o.settle_seconds,
+                                "limits": {k: f"{n} per {s // 3600}h" if s >= 3600 else f"{n} per {s // 60}m"
+                                           for k, (n, s) in o.limits.items()},
+                                "namespaces": o.run["namespaces"]} if o.mutating else {})}
                            for o in sorted(self.operations.values(), key=lambda o: o.name)],
             "errors": [{"file": k, "error": v} for k, v in sorted(self.errors.items())],
         }

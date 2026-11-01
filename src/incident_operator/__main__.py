@@ -3,7 +3,10 @@
 Env: DATABASE_URL; GPU_SCHEDULER_URL, GPU_SCHEDULER_TOKEN, TRIAGE_MODEL, TRIAGE_FALLBACK,
 TRIAGE_FALLBACK_AFTER_SECONDS (triage.Config); SMTP_* and PUBLIC_URL (notify.SmtpConfig); PRIMER_PATH;
 UI_PORT, WEBHOOK_PORT (8080, 8081); KUBE_API_URL for local runs (`kubectl proxy`); EVIDENCE=off to skip the Kubernetes reads;
-RUNBOOKS_DIR, OPERATIONS_DIR (/etc/incident-operator/{runbooks,operations}); PROMETHEUS_URL.
+RUNBOOKS_DIR, OPERATIONS_DIR (/etc/incident-operator/{runbooks,operations}); PROMETHEUS_URL; OIDC_ISSUER,
+OIDC_CLIENT_ID, OIDC_CLIENT_SECRET for sign-in (app.py).
+
+`python -m incident_operator executor` runs fixes approved in the UI (executor.py), as its own Deployment.
 
 `python -m incident_operator replay ...` re-runs stored incidents against another model or edited runbooks (replay.py).
 """
@@ -78,4 +81,7 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["replay"]:
         from .replay import main as replay
         sys.exit(replay(sys.argv[2:]))
+    if sys.argv[1:2] == ["executor"]:
+        from .executor import main as executor
+        sys.exit(executor())
     main()

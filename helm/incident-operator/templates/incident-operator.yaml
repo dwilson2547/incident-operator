@@ -34,7 +34,8 @@ data:
 {{- end }}
 ---
 # Read-only: the evidence for an alert (pods and their logs, events, Jobs, workloads, nodes, scrape-job-manager's
-# ScrapeJobs). Nothing in phase 1 or 2 changes anything.
+# ScrapeJobs), and the pre/post checks of fixes. The controller changes nothing in the cluster but its own probe Jobs;
+# fixes are the executor's, below.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -142,6 +143,14 @@ spec:
             - {name: SMTP_FROM, value: {{ .Values.smtp.from | quote }}}
             - {name: SMTP_TO, value: {{ .Values.smtp.to | quote }}}
             - {name: PUBLIC_URL, value: {{ .Values.ui.publicUrl | quote }}}
+            {{- with .Values.ui.oidc }}
+            {{- if .issuer }}
+            - {name: OIDC_ISSUER, value: {{ .issuer | quote }}}
+            - {name: OIDC_CLIENT_ID, value: {{ .clientId | quote }}}
+            - name: OIDC_CLIENT_SECRET
+              valueFrom: {secretKeyRef: {name: {{ required "ui.oidc.secret (key client_secret)" .secret }}, key: client_secret}}
+            {{- end }}
+            {{- end }}
           volumeMounts:
             - {name: files, mountPath: /etc/incident-operator/primer, readOnly: true}
             - {name: runbooks, mountPath: /etc/incident-operator/runbooks, readOnly: true}
@@ -195,3 +204,83 @@ spec:
             pathType: Prefix
             backend:
               service: {name: incident-operator, port: {name: http}}
+---
+# The executor (design §7.2, executor.py): runs fixes approved in the UI, one verb at a time. Its own ServiceAccount
+# whose rights are generated from the mutating operations in files/operations: for each one, a Role in each namespace
+# it lists, with exactly what its verb needs. A fix that isn't committed has no rights to use.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: incident-operator-executor
+  labels: {{- toYaml $labels | nindent 4 }}
+{{- range $path, $_ := .Files.Glob "files/operations/*.yaml" }}
+{{- $op := $.Files.Get $path | fromYaml }}
+{{- if $op.mutating }}
+{{- range $ns := $op.run.namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: incident-operator-fix-{{ $op.name }}
+  namespace: {{ $ns }}
+  labels: {{- toYaml $labels | nindent 4 }}
+rules:
+  {{- if eq $op.run.verb "DeletePods" }}
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list, delete]
+  {{- else if eq $op.run.verb "CreateJobFrom" }}
+  - apiGroups: [batch]
+    resources: [cronjobs]
+    verbs: [get]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create]
+  {{- else }}
+  {{- fail (printf "operation %s: the chart doesn't know verb %s's RBAC" $op.name $op.run.verb) }}
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: incident-operator-fix-{{ $op.name }}
+  namespace: {{ $ns }}
+  labels: {{- toYaml $labels | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: incident-operator-fix-{{ $op.name }}}
+subjects:
+  - {kind: ServiceAccount, name: incident-operator-executor, namespace: {{ $.Release.Namespace }}}
+{{- end }}
+{{- end }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: incident-operator-executor
+  labels: {{- toYaml $labels | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: incident-operator-executor}
+  template:
+    metadata:
+      labels: {app: incident-operator-executor}
+    spec:
+      serviceAccountName: incident-operator-executor
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, runAsGroup: 65534, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: executor
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          command: [python, -m, incident_operator, executor]
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ .Values.secrets.database }}, key: DATABASE_URL}}
+            - {name: OPERATIONS_DIR, value: /etc/incident-operator/operations}
+          volumeMounts:
+            - {name: operations, mountPath: /etc/incident-operator/operations, readOnly: true}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {{- toYaml .Values.executorResources | nindent 12 }}
+      volumes:
+        - name: operations
+          configMap: {name: incident-operator-operations}

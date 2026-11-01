@@ -240,7 +240,7 @@ def test_hourly_cap_holds_the_rest_and_skips_long_resolved(conn, tmp_path):
 
 
 def test_migrates_a_phase_1_database(conn):
-    conn.execute("DROP TABLE evidence, model_turns, incidents")
+    conn.execute("DROP TABLE op_runs, evidence, model_turns, incidents")
     old = db.SCHEMA.split("-- Added after the first release")[0].replace(", 'repeat', 'skipped'", "")
     conn.execute(old)
     conn.execute("INSERT INTO incidents (fingerprint, alertname, labels, annotations) VALUES ('f', 'A', '{}', '{}')")

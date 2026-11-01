@@ -62,14 +62,21 @@ pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px
   max-height: 420px; margin: 6px 0 0; font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; }
 details { margin-top: 8px; } summary { cursor: pointer; color: var(--text-2); }
 .err { color: var(--critical); }
+.f-proposed { --c: var(--warning); } .f-approved, .f-ready, .f-running, .f-settling { --c: var(--accent); }
+.f-succeeded { --c: var(--good); } .f-failed, .f-post_failed, .f-refused { --c: var(--critical); }
+.fix { border-top: 1px solid var(--border); padding: 12px 0 4px; } .fix:first-child { border-top: 0; padding-top: 0; }
+.fix .actions { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: .5; cursor: default; }
 </style>
 </head>
 <body>
 <header>
   <h1><a href="#/" style="color:inherit">Incidents</a></h1>
   <nav><a href="#/" id="nav-incidents">Incidents</a> <a href="#/runbooks" id="nav-runbooks">Runbooks</a></nav>
-  <span class="muted" style="font-size:12px">suggestions only: nothing here changes the cluster</span>
+  <span class="muted" style="font-size:12px">nothing changes the cluster unless you approve a fix</span>
   <div class="spacer"></div>
+  <span class="muted" style="font-size:12px" id="me"></span>
   <span class="muted" style="font-size:12px" id="updated"></span>
   <button id="theme" title="Toggle light/dark">◐</button>
 </header>
@@ -93,18 +100,25 @@ const clock = t => t ? new Date(t).toLocaleString([], { month: "short", day: "nu
 const TARGET = ["namespace", "pod", "job_name", "deployment", "statefulset", "daemonset", "node", "instance"];
 const target = l => TARGET.filter(k => l[k]).map(k => `${k}=${l[k]}`).join(" ");
 const STATUS = { new: "new", triaging: "triaging", investigating: "investigating", advising: "advising", analysed: "analysed", triage_failed: "triage failed", repeat: "repeat", skipped: "skipped" };
-const state = { lastOk: null };
+const state = { lastOk: null, me: { user: null, can_decide: false } };
+const FIX = { suggested: "suggested: run it yourself", proposed: "awaiting approval", approved: "approved: pre-checking",
+  rejected: "rejected", refused: "refused", ready: "waiting for the executor", running: "running",
+  settling: "done: post-checks soon", failed: "failed", succeeded: "succeeded", post_failed: "post-check failed" };
+const fixTag = st => `<span class="tag f-${esc(st)}">${esc(FIX[st] || st)}</span>`;
 const lget = k => { try { return localStorage.getItem("io." + k); } catch { return null; } };
 const lset = (k, v) => { try { localStorage.setItem("io." + k, v); } catch {} };
 function theme(t) { if (t === "light") document.documentElement.dataset.theme = "light"; else delete document.documentElement.dataset.theme; }
 theme(lget("theme"));
 $("#theme").onclick = () => { const t = document.documentElement.dataset.theme === "light" ? "dark" : "light"; lset("theme", t); theme(t); };
 
-async function api(path) {
-  const r = await fetch(path, { headers: { Accept: "application/json" } });
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? { headers: { Accept: "application/json" } }
+    : { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (r.status === 401) { location.href = "/api/auth/oidc/login?next=" + encodeURIComponent("/" + location.hash); throw new Error("signing in"); }
+  if (!r.ok) { let d = ""; try { d = (await r.json()).detail; } catch {} throw new Error(d || `${r.status} ${r.statusText}`); }
   return r.json();
 }
+api("/api/me").then(m => { state.me = m; $("#me").textContent = m.user ? "signed in as " + m.user : m.can_decide ? "local run: approvals allowed" : "not signed in: fixes can't be approved here"; }).catch(() => {});
 function failing(err) {
   $("#banner").classList.toggle("hidden", !err);
   if (err) $("#banner").textContent = `Can't reach the server (${err.message}). Retrying; showing data from ${state.lastOk ? ago(state.lastOk) : "never"}.`;
@@ -135,7 +149,7 @@ function renderList(d) {
       <td title="${esc(clock(i.first_seen))}" style="white-space:nowrap">${ago(i.first_seen)}${i.alert_resolved_at ? `<div class="muted" style="font-size:12px">resolved</div>` : ""}${i.repeats ? `<div class="muted" style="font-size:12px;white-space:normal;min-width:110px" title="Fired again ${i.repeats}× since; not triaged again">+${i.repeats} repeat${i.repeats > 1 ? "s" : ""}, last ${ago(i.last_repeat)}${i.repeats_open ? " (firing)" : ""}</div>` : ""}</td>
       <td><span class="tag sev-${esc(i.severity || "")}">${esc(i.alertname)}</span>${i.runbook ? `<div class="muted" style="font-size:12px;margin-top:3px">runbook ${esc(i.runbook)}</div>` : ""}</td>
       <td class="muted" style="font-size:12.5px">${esc(target(i.labels)) || "–"}</td>
-      <td><span class="tag s-${esc(i.status)}">${esc(STATUS[i.status] || i.status)}</span></td>
+      <td><span class="tag s-${esc(i.status)}">${esc(STATUS[i.status] || i.status)}</span>${i.fix_status && i.fix_status !== "suggested" ? `<div style="margin-top:4px">${fixTag(i.fix_status)}</div>` : ""}</td>
       <td style="white-space:nowrap">${i.analysis_model ? `${esc(i.analysis_model)}<div class="muted" style="font-size:12px">${esc(i.analysis_worker || "")}</div>` : "–"}</td>
       <td class="preview" title="${esc(i.analysis_preview || "")}">${esc(i.analysis_preview || "")}</td></tr>`).join("")}</tbody></table>`
     : `<div class="empty">No incidents yet. They appear when Alertmanager sends an alert that's routed here (the ones that are also mailed).</div>`;
@@ -159,7 +173,7 @@ function renderIncident(i) {
         <h2>${esc(i.alertname)} <span class="tag s-${esc(i.status)}" style="text-transform:none">${esc(STATUS[i.status] || i.status)}</span></h2>
         <div class="card">
           ${i.status === "analysed" && i.findings ? findingsHtml(i)
-              + `<p class="muted" style="margin:12px 0 0;font-size:12.5px">Answered by <b>${esc(i.analysis_model)}</b> on ${esc(i.analysis_worker || "?")} after ${i.turns.filter(t => t.session === "investigation").length} investigation turn(s) · suggestion only, nothing was changed</p>`
+              + `<p class="muted" style="margin:12px 0 0;font-size:12.5px">Answered by <b>${esc(i.analysis_model)}</b> on ${esc(i.analysis_worker || "?")} after ${i.turns.filter(t => t.session === "investigation").length} investigation turn(s)${i.fixes.some(f => f.started_at) ? "" : " · nothing was changed"}</p>`
             : i.status === "analysed" ? `<div class="answer">${esc(i.analysis)}</div>
               <p class="muted" style="margin:12px 0 0;font-size:12.5px">Answered by <b>${esc(i.analysis_model)}</b> on ${esc(i.analysis_worker || "?")}${turn && turn.ran_model && turn.ran_model !== turn.model ? ` (fallback from ${esc(turn.model)})` : ""} · suggestion only, nothing was changed</p>`
             : i.status === "triage_failed" ? `<div class="err">The model couldn't analyse this: ${esc(i.error || "unknown error")}</div>`
@@ -167,12 +181,13 @@ function renderIncident(i) {
             : i.status === "skipped" ? `<div class="muted">${esc(i.error || "Not triaged.")}</div>`
             : `<div class="muted">${i.status === "new" ? "Collecting evidence…" : i.status === "investigating" ? `Investigating with runbook ${esc(i.runbook)}, turn ${i.turns.length}…` : i.status === "advising" ? "Findings are in; writing the suggestion…" : "Waiting for the model…"} This page refreshes on its own.</div>${i.findings ? findingsHtml(i) : ""}`}
         </div>
+        ${i.fixes.length ? `<h2>Fix</h2><div class="card">${i.fixes.map(fixHtml).join("")}</div>` : ""}
         ${i.repeats.length ? `<h2>Fired again since (${i.repeats.length}${i.repeats.length === 100 ? "+" : ""}), not triaged again</h2>
           <div class="card scroll" style="padding:0"><table><thead><tr><th>#</th><th>Fired</th><th>Target</th><th>Resolved</th></tr></thead><tbody>
           ${i.repeats.map(r => `<tr><td><a href="#/incident/${r.id}">${r.id}</a></td><td>${clock(r.first_seen)}</td><td class="muted" style="font-size:12.5px">${esc(target(r.labels)) || "–"}</td><td>${r.alert_resolved_at ? clock(r.alert_resolved_at) : "firing"}</td></tr>`).join("")}
           </tbody></table></div>` : ""}
         ${i.status === "repeat" || i.status === "skipped" ? "" : `<h2>Evidence the model was given</h2>
-        <div class="card">${i.evidence.length ? i.evidence.map(e => `<details ${e.kind === "logs" || e.trigger !== "generic" ? "" : "open"}><summary>${e.trigger === "requested" ? `<span class="muted">asked for in turn ${e.round}:</span> ` : ""}${e.operation ? `<b>${esc(e.operation)}</b> <span class="muted">${esc(e.source !== e.operation ? e.source : "")}</span>` : esc(e.source)}${e.truncated ? " <span class='muted'>(truncated)</span>" : ""}</summary>
+        <div class="card">${i.evidence.length ? i.evidence.map(e => `<details ${e.kind === "logs" || e.trigger !== "generic" ? "" : "open"}><summary>${e.trigger === "requested" ? `<span class="muted">asked for in turn ${e.round}:</span> ` : e.trigger === "pre" ? `<span class="muted">pre-check:</span> ` : e.trigger === "post" ? `<span class="muted">post-check:</span> ` : ""}${e.operation ? `<b>${esc(e.operation)}</b> <span class="muted">${esc(e.source !== e.operation ? e.source : "")}</span>` : esc(e.source)}${e.truncated ? " <span class='muted'>(truncated)</span>" : ""}</summary>
             ${e.content != null ? `<pre>${esc(e.content)}</pre>` : `<div class="err" style="margin-top:6px">could not read: ${esc(e.error)}</div>`}</details>`).join("")
           : `<div class="muted">None: the alert names no pod, job, workload or node.</div>`}</div>`}
         ${i.turns.length ? `<h2>Model turns</h2><div class="card">${i.turns.map(turnHtml).join("")}</div>` : ""}
@@ -194,6 +209,33 @@ function renderIncident(i) {
     </div>`;
   if (was) view.querySelectorAll("details").forEach((d, k) => { if (k < was.length) d.open = was[k]; });
 }
+
+function fixHtml(f) {
+  const can = f.status === "proposed" && state.me.can_decide;
+  return `<div class="fix"><div><b>${esc(f.operation)}</b> ${fixTag(f.status)} <span class="muted" style="font-size:12px">autonomy ${esc(f.autonomy)} · proposed ${ago(f.proposed_at)}</span></div>
+    ${f.command ? `<pre>${esc(f.command)}</pre>` : ""}
+    <dl class="kv" style="margin-top:8px">
+      ${f.decided_by ? `<dt>${f.status === "rejected" ? "Rejected" : "Approved"} by</dt><dd>${esc(f.decided_by)}, ${clock(f.decided_at)}</dd>` : ""}
+      ${f.result ? `<dt>Did</dt><dd>${esc(f.result)}${f.started_at ? ` <span class="muted">(${clock(f.started_at)})</span>` : ""}</dd>` : ""}
+      ${f.status === "settling" && f.post_due_at ? `<dt>Post-checks</dt><dd>${new Date(f.post_due_at) > Date.now() ? "in " + dur((new Date(f.post_due_at) - Date.now()) / 1000) : "running…"}</dd>` : ""}
+      ${f.error ? `<dt>Problem</dt><dd class="err">${esc(f.error)}</dd>` : ""}</dl>
+    ${f.checks ? `<pre>${esc(f.checks)}</pre>` : ""}
+    ${f.status === "suggested" ? `<p class="muted" style="font-size:12.5px;margin:8px 0 0">At autonomy suggest nothing runs from here: run the command yourself if it fits. Raising it to approve is a commit to the runbook.</p>` : ""}
+    ${f.status === "proposed" ? `<div class="actions">${can ? `<button class="primary" data-fix="${f.id}" data-act="approve">Approve</button><button data-fix="${f.id}" data-act="reject">Reject</button>`
+        : `<span class="muted">Sign in to approve or reject.</span>`}<span class="muted" style="font-size:12.5px">Pre-checks run when you approve; if the situation has changed, the fix is refused.</span></div>` : ""}</div>`;
+}
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button[data-fix]");
+  if (!b) return;
+  const approve = b.dataset.act === "approve", pre = b.closest(".fix").querySelector("pre");
+  if (!confirm(approve ? `Approve this fix? After its pre-checks pass, the executor runs:\n\n${pre ? pre.textContent : ""}` : "Reject this fix? It won't run."))
+    return;
+  b.closest(".actions").querySelectorAll("button").forEach(x => x.disabled = true);
+  try { await api(`/api/fixes/${b.dataset.fix}/${b.dataset.act}`, {}); }
+  catch (err) { alert("Didn't go through: " + err.message); }
+  refresh();
+});
 
 function findingsHtml(i) {
   const f = i.findings || {}, a = i.advice;
@@ -225,17 +267,29 @@ function renderRunbooks(d) {
   $("#view-runbooks").innerHTML = `
     ${d.errors.length ? `<h2>Rejected files</h2><div class="card">${d.errors.map(e => `<div style="margin:4px 0"><b>${esc(e.file)}</b>: <span class="err">${esc(e.error)}</span></div>`).join("")}
       <p class="muted" style="margin:8px 0 0;font-size:12px">The last good version of a rejected file stays live; a new file that never loaded is simply absent.</p></div>` : ""}
+    <h2>Fixes (${d.operations.filter(o => o.mutating).length})</h2>
+    <div class="card scroll" style="padding:0">${d.operations.some(o => o.mutating) ? `<table><thead><tr><th>Fix</th><th>Verb</th><th>Autonomy</th><th>Checks</th><th>Limits</th><th class="n">Proposed</th><th class="n">Ran</th><th class="n">Passed post</th><th>Last failure</th></tr></thead><tbody>
+      ${d.operations.filter(o => o.mutating).map(o => { const r = o.record || {}; return `<tr><td><b>${esc(o.name)}</b> <span class="muted" style="font-size:12px">${esc(o.rev)}</span><div class="muted" style="font-size:12.5px;max-width:420px">${esc(o.description)}</div></td>
+        <td class="muted">${esc(o.kind)}<div style="font-size:12px">in ${esc(o.namespaces.join(", "))}</div></td>
+        <td style="font-size:12.5px">${esc(o.autonomy)}${Object.entries(o.runbooks).map(([rb, a]) => `<div class="muted">${esc(rb)}: ${esc(a)}</div>`).join("")}</td>
+        <td style="font-size:12.5px">${o.pre.map(c => `pre ${esc(c.op)}: ${esc(c.expect)}`).join("<br>")}${o.pre.length ? "<br>" : ""}${o.post.map(c => `post ${esc(c.op)}: ${esc(c.expect)}`).join("<br>")}<div class="muted">post-checks ${o.settle_seconds}s after</div></td>
+        <td style="font-size:12.5px">per target ${esc(o.limits.perTarget)}<br>overall ${esc(o.limits.global)}</td>
+        <td class="n">${r.proposed || 0}</td><td class="n">${r.ran || 0}</td><td class="n">${r.ran ? `${r.succeeded}/${r.ran}` : "–"}</td>
+        <td class="muted">${r.last_failure ? ago(r.last_failure) : "–"}</td></tr>`; }).join("")}</tbody></table>
+      <p class="muted" style="margin:8px 12px;font-size:12px">A fix's record is what raising its autonomy is decided on: suggest → approve once it's confirmed right, approve → auto (later) after several runs that passed their post-checks. Either is a commit.</p>`
+      : `<div class="empty">No fixes loaded. They are operations with mutating: true in the chart's files/operations folder.</div>`}</div>
     <h2>Runbooks (${d.runbooks.length})</h2>
-    <div class="card scroll" style="padding:0">${d.runbooks.length ? `<table><thead><tr><th>Runbook</th><th>Matches</th><th>Target</th><th>Precursors</th><th>Can ask for</th><th class="n">Incidents</th><th>Last</th></tr></thead><tbody>
+    <div class="card scroll" style="padding:0">${d.runbooks.length ? `<table><thead><tr><th>Runbook</th><th>Matches</th><th>Target</th><th>Precursors</th><th>Can ask for</th><th>Fixes</th><th class="n">Incidents</th><th>Last</th></tr></thead><tbody>
       ${d.runbooks.map(r => `<tr><td><b>${esc(r.name)}</b> <span class="muted" style="font-size:12px">${esc(r.rev)} · ~${r.tokens} tokens</span><div class="muted" style="font-size:12.5px;max-width:420px">${esc(r.description)}</div>${r.warnings.map(w => `<div class="err" style="font-size:12px">${esc(w)}</div>`).join("")}</td>
         <td style="font-size:12.5px">${Object.entries(r.match).map(([k, v]) => `${esc(k)} = ${esc([].concat(v).join(" | "))}`).join("<br>")}${r.priority ? `<div class="muted">priority ${r.priority}</div>` : ""}</td>
         <td style="font-size:12.5px">${r.target ? esc(r.target.kind) + `<div class="muted">${esc(r.target.from || [r.target.namespace, r.target.name].filter(Boolean).join("/"))}</div>` : "–"}</td>
         <td style="font-size:12.5px">${r.precursors.map(esc).join("<br>") || "–"}</td><td style="font-size:12.5px">${r.operations.map(esc).join("<br>") || "–"}</td>
+        <td style="font-size:12.5px">${Object.entries(r.fixes).map(([n, a]) => `${esc(n)} <span class="muted">(${esc(a)})</span>`).join("<br>") || "–"}</td>
         <td class="n">${r.incidents}</td><td class="muted">${r.last_matched ? ago(r.last_matched) : "never"}</td></tr>`).join("")}</tbody></table>`
       : `<div class="empty">No runbooks loaded. They come from the chart's files/runbooks folder.</div>`}</div>
-    <h2>Read-only operations (${d.operations.length})</h2>
+    <h2>Read-only operations (${d.operations.filter(o => !o.mutating).length})</h2>
     <div class="card scroll" style="padding:0">${d.operations.length ? `<table><thead><tr><th>Operation</th><th>Kind</th><th>What it reads</th></tr></thead><tbody>
-      ${d.operations.map(o => `<tr><td><b>${esc(o.name)}</b> <span class="muted" style="font-size:12px">${esc(o.rev)}</span></td><td class="muted">${esc(o.kind)}</td><td style="font-size:12.5px">${esc(o.description)}</td></tr>`).join("")}</tbody></table>`
+      ${d.operations.filter(o => !o.mutating).map(o => `<tr><td><b>${esc(o.name)}</b> <span class="muted" style="font-size:12px">${esc(o.rev)}</span></td><td class="muted">${esc(o.kind)}</td><td style="font-size:12.5px">${esc(o.description)}</td></tr>`).join("")}</tbody></table>`
       : `<div class="empty">No operations loaded.</div>`}</div>`;
 }
 

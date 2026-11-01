@@ -1,0 +1,26 @@
+name: restart-csi-nfs-node
+description: Delete the node's csi-nfs-node pod (kube-system). Its DaemonSet recreates it, and the stuck mount.nfs processes, its children, die with it.
+mutating: true
+autonomy: suggest                 # the NFS runbook raises it to approve
+params:
+  node: {from: target.name}
+# Fresh probe at approval time: still wedged (not a slow mount), and the stuck mounts are the CSI pod's children, so
+# deleting it is what clears them (2026-10-22: 102 mount.nfs died with it).
+pre:
+  - {op: nfs-dstate, expect: "mount_nfs_dstate_older_than_10m > 0"}
+  - {op: nfs-dstate, expect: "parents_are_csi_nfs_node == true"}
+run:
+  verb: DeletePods
+  namespaces: [kube-system]
+  namespace: kube-system
+  selector: {app: csi-nfs-node}
+  node: "{node}"
+  maxPods: 1
+# Stuck mounts back after two minutes means the server side (Tower's nfsd), which the runbook escalates.
+# numberUnavailable is left out of a DaemonSet's status when it is 0: the recreated pod is up.
+post:
+  settle: 120
+  checks:
+    - {op: nfs-dstate, expect: "mount_nfs_dstate_total == 0"}
+    - {op: csi-nfs-node-status, expect: "status.numberUnavailable == null"}
+limits: {perTarget: 1/1h, global: 3/24h}

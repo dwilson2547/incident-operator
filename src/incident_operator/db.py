@@ -100,6 +100,34 @@ ALTER TABLE evidence ADD COLUMN IF NOT EXISTS data jsonb;
 ALTER TABLE model_turns ADD COLUMN IF NOT EXISTS turn int NOT NULL DEFAULT 1;
 ALTER TABLE model_turns ADD COLUMN IF NOT EXISTS json_schema jsonb;
 ALTER TABLE model_turns ADD COLUMN IF NOT EXISTS output jsonb;               -- the parsed JSON reply
+
+-- Phase 3: fixes (design §7, fixes.py). One row per proposed mutating operation; its pre/post check results are
+-- evidence rows with trigger pre|post. `notified` is the status last mailed, so each outcome is mailed once.
+CREATE TABLE IF NOT EXISTS op_runs (
+    id             bigserial PRIMARY KEY,
+    incident_id    bigint NOT NULL REFERENCES incidents (id) ON DELETE CASCADE,
+    operation      text NOT NULL,
+    op_rev         text NOT NULL,
+    params         jsonb NOT NULL,
+    autonomy       text NOT NULL,
+    status         text NOT NULL CHECK (status IN ('suggested', 'proposed', 'approved', 'rejected', 'refused',
+                                                   'ready', 'running', 'settling', 'failed', 'succeeded',
+                                                   'post_failed')),
+    command        text,                           -- the kubectl equivalent
+    proposed_at    timestamptz NOT NULL DEFAULT now(),
+    decided_by     text,
+    decided_at     timestamptz,
+    started_at     timestamptz,
+    post_due_at    timestamptz,
+    finished_at    timestamptz,
+    checks         text,                           -- one line per pre/post check: pass/FAIL, expectation, value seen
+    result         text,                           -- what the executor did
+    error          text,
+    notified       text
+);
+CREATE INDEX IF NOT EXISTS op_runs_incident ON op_runs (incident_id);
+CREATE INDEX IF NOT EXISTS op_runs_active ON op_runs (status)
+    WHERE status IN ('proposed', 'approved', 'ready', 'running', 'settling');
 """
 
 
@@ -266,6 +294,109 @@ def mark_notified(conn: psycopg.Connection, incident_id: int) -> None:
     conn.execute("UPDATE incidents SET notified_at = now() WHERE id = %s", (incident_id,))
 
 
+# -- fixes (fixes.py, executor.py) ---------------------------------------------------------------------------------------
+
+def add_op_run(conn: psycopg.Connection, incident_id: int, operation: str, op_rev: str, params: dict, autonomy: str,
+               status: str, command: str | None = None, error: str | None = None) -> int:
+    return conn.execute(
+        "INSERT INTO op_runs (incident_id, operation, op_rev, params, autonomy, status, command, error, finished_at)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CASE WHEN %s = 'refused' THEN now() END) RETURNING id",
+        (incident_id, operation, op_rev, Jsonb(params), autonomy, status, command, error, status)).fetchone()["id"]
+
+
+def get_op_run(conn: psycopg.Connection, run_id: int) -> dict | None:
+    return conn.execute("SELECT * FROM op_runs WHERE id = %s", (run_id,)).fetchone()
+
+
+def op_runs_with_status(conn: psycopg.Connection, status: str) -> list[dict]:
+    return conn.execute("SELECT * FROM op_runs WHERE status = %s ORDER BY id", (status,)).fetchall()
+
+
+def decide_op_run(conn: psycopg.Connection, run_id: int, approve: bool, who: str) -> bool:
+    """Approve or reject a proposed fix. False if it isn't awaiting a decision (already decided, or suggest-only)."""
+    row = conn.execute(
+        "UPDATE op_runs SET status = %s, decided_by = %s, decided_at = now(),"
+        " finished_at = CASE WHEN %s THEN NULL ELSE now() END WHERE id = %s AND status = 'proposed' RETURNING id",
+        ("approved" if approve else "rejected", who, approve, run_id)).fetchone()
+    return row is not None
+
+
+_FINAL = ("refused", "rejected", "failed", "succeeded", "post_failed")
+
+
+def update_op_run(conn: psycopg.Connection, run_id: int, status: str, *, checks: str | None = None,
+                  result: str | None = None, error: str | None = None, settle_seconds: int | None = None) -> None:
+    conn.execute(
+        """
+        UPDATE op_runs SET status = %(s)s,
+            checks = coalesce(%(checks)s, checks), result = coalesce(%(result)s, result), error = %(error)s,
+            post_due_at = CASE WHEN %(settle)s::int IS NOT NULL THEN now() + make_interval(secs => %(settle)s) ELSE post_due_at END,
+            finished_at = CASE WHEN %(s)s = ANY(%(final)s) THEN now() ELSE finished_at END
+        WHERE id = %(id)s
+        """,
+        {"s": status, "checks": checks, "result": result, "error": error, "settle": settle_seconds,
+         "final": list(_FINAL), "id": run_id})
+
+
+def claim_ready(conn: psycopg.Connection) -> dict | None:
+    """The executor takes the oldest ready run (one executor, but safe with more)."""
+    return conn.execute(
+        "UPDATE op_runs SET status = 'running', started_at = now() WHERE id = ("
+        " SELECT id FROM op_runs WHERE status = 'ready' ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *"
+    ).fetchone()
+
+
+def op_runs_due_for_post(conn: psycopg.Connection) -> list[dict]:
+    return conn.execute("SELECT * FROM op_runs WHERE status = 'settling' AND post_due_at <= now() ORDER BY id"
+                        ).fetchall()
+
+
+def expire_ready(conn: psycopg.Connection, seconds: int) -> int:
+    return len(conn.execute(
+        "UPDATE op_runs SET status = 'failed', finished_at = now(),"
+        " error = 'the executor did not take it in time: is the executor running?'"
+        " WHERE status = 'ready' AND decided_at < now() - make_interval(secs => %s) RETURNING id", (seconds,)
+    ).fetchall())
+
+
+def op_runs_since(conn: psycopg.Connection, operation: str, seconds: int, params: dict | None = None) -> int:
+    """Runs of an operation that reached the cluster (or are about to) in the window, for its limits."""
+    return conn.execute(
+        "SELECT count(*) AS n FROM op_runs WHERE operation = %s"
+        " AND status IN ('ready', 'running', 'settling', 'failed', 'succeeded', 'post_failed')"
+        " AND coalesce(started_at, decided_at) > now() - make_interval(secs => %s)"
+        " AND (%s::jsonb IS NULL OR params = %s::jsonb)",
+        (operation, seconds, Jsonb(params) if params is not None else None,
+         Jsonb(params) if params is not None else None)).fetchone()["n"]
+
+
+def op_runs_to_notify(conn: psycopg.Connection) -> list[dict]:
+    """Outcomes of approved fixes not yet mailed (the proposal itself goes out with the incident's email)."""
+    return conn.execute(
+        "SELECT * FROM op_runs WHERE decided_by IS NOT NULL AND status = ANY(%s)"
+        " AND notified IS DISTINCT FROM status ORDER BY id", (list(_FINAL),)).fetchall()
+
+
+def mark_op_run_notified(conn: psycopg.Connection, run_id: int, status: str) -> None:
+    conn.execute("UPDATE op_runs SET notified = %s WHERE id = %s", (status, run_id))
+
+
+def operation_records(conn: psycopg.Connection) -> list[dict]:
+    """Each fix's record (design §7.1), what moving it up an autonomy level is decided on."""
+    return conn.execute(
+        """
+        SELECT operation, count(*) AS proposed,
+               count(*) FILTER (WHERE status IN ('succeeded', 'post_failed', 'failed')) AS ran,
+               count(*) FILTER (WHERE status = 'succeeded') AS succeeded,
+               count(*) FILTER (WHERE status = 'post_failed') AS post_failed,
+               count(*) FILTER (WHERE status = 'failed') AS failed,
+               count(*) FILTER (WHERE status = 'rejected') AS rejected,
+               count(*) FILTER (WHERE status = 'refused') AS refused,
+               max(finished_at) FILTER (WHERE status IN ('post_failed', 'failed')) AS last_failure
+        FROM op_runs GROUP BY operation
+        """).fetchall()
+
+
 # -- reading (UI) ------------------------------------------------------------------------------------------------------
 
 def list_incidents(conn: psycopg.Connection, limit: int = 200) -> list[dict]:
@@ -274,6 +405,7 @@ def list_incidents(conn: psycopg.Connection, limit: int = 200) -> list[dict]:
         SELECT i.id, i.fingerprint, i.alertname, i.severity, i.labels, i.status, i.runbook, i.first_seen, i.last_seen,
                i.alert_resolved_at, i.analysis_model, i.analysis_worker, i.notified_at,
                left(i.analysis, 300) AS analysis_preview,
+               (SELECT status FROM op_runs o WHERE o.incident_id = i.id ORDER BY o.id DESC LIMIT 1) AS fix_status,
                r.n AS repeats, r.open AS repeats_open, r.last AS last_repeat
         FROM incidents i
         LEFT JOIN LATERAL (
@@ -295,6 +427,7 @@ def get_incident(conn: psycopg.Connection, incident_id: int) -> dict | None:
                                    (incident_id,)).fetchall()
     inc["turns"] = conn.execute("SELECT * FROM model_turns WHERE incident_id = %s ORDER BY id",
                                 (incident_id,)).fetchall()
+    inc["fixes"] = conn.execute("SELECT * FROM op_runs WHERE incident_id = %s ORDER BY id", (incident_id,)).fetchall()
     inc["repeats"] = conn.execute(
         "SELECT id, labels, first_seen, last_seen, alert_resolved_at FROM incidents WHERE repeat_of = %s"
         " ORDER BY first_seen DESC LIMIT 100", (incident_id,)).fetchall()

@@ -1,0 +1,8 @@
+name: csi-nfs-node-status
+description: The csi-nfs-node DaemonSet's pod counts - scheduled, ready, and unavailable (absent when none are).
+mutating: false
+run:
+  kind: k8s-get
+  path: /apis/apps/v1/namespaces/kube-system/daemonsets/csi-nfs-node
+  fields: [status.desiredNumberScheduled, status.numberReady, status.numberUnavailable]
+budget: {maxChars: 500}

@@ -15,6 +15,8 @@ export DATABASE_URL="postgresql://postgres@127.0.0.1:55444/postgres"
 F="$PWD/helm/incident-operator/files"
 export EVIDENCE=off PRIMER_PATH="$F/primer.md" RUNBOOKS_DIR="$F/runbooks" OPERATIONS_DIR="$F/operations"
 export UI_PORT=${UI_PORT:-8090} WEBHOOK_PORT=${WEBHOOK_PORT:-8091}
+# Approve/Reject work without sign-in here; no executor runs locally, so an approved fix waits and then times out.
+export ALLOW_ANONYMOUS_DECISIONS=1
 nohup .venv/bin/python -m incident_operator > .pids/io.log 2>&1 &
 echo $! > .pids/io.pid
 echo "UI on http://127.0.0.1:$UI_PORT, webhook on :$WEBHOOK_PORT (log: .pids/io.log)"

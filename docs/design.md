@@ -674,8 +674,14 @@ After several approved runs where the post-check passed, raising it to `auto` is
    `node-kmsg-nfs` left out (it needs `/dev/kmsg` and CAP_SYSLOG). Originally: File loading and validation, precursors, the investigation
    loop, findings, the remediation session as suggestion only, probes, replay. First runbooks: NFS client wedge
    (§12), the scraper failure classes, `KubeJobFailed` for backups.
-3. **Approved fixes.** Mutating operations, the executor with `DeletePods` and `CreateJobFrom`, generated RBAC, pre-
-   and post-checks, limits. First: `restart-csi-nfs-node` at `approve`.
+3. **Approved fixes.** ✅ Built 2026-11-01 (README "Fixes"). Mutating operations, the executor with `DeletePods` and
+   `CreateJobFrom`, generated RBAC, pre- and post-checks, limits. First: `restart-csi-nfs-node` at `approve`. Changes
+   from §7, §8 and §10: fix state lives on `op_runs` rows, not in new incident statuses; the controller runs the pre-
+   and post-checks (it holds the probe and read rights) and the executor only the verb; a mutating operation lists its
+   namespaces (`run.namespaces`), because the chart makes namespaced Roles from them; post-checks are read-only
+   operations with an expectation, no inline `k8s:` check form; `auto` is refused at load until phase 4; operations
+   and their records are a "Fixes" table on the Runbooks page rather than their own page. No `CreateJobFrom` fix ships
+   yet: the first backup failure triaged (2026-11-01) needed a config change, not a rerun.
 4. **Auto** for operations with a record. More verbs as runbooks need them. CRDs if the formats have settled (§4.3).
 
 ## 15. Open questions

@@ -6,7 +6,8 @@ restart picks up where it stopped:
 2. submitted turns: poll gpu-scheduler. A triage answer -> `analysed`. An investigation reply either asks for checks
    from its menu (they run, the next turn is submitted) or finishes with findings (the remediation turn is submitted
    -> `advising`). Remediation advice -> `analysed`. A failed job -> `triage_failed`
-3. analysed or failed incidents not yet mailed: send the email
+3. fixes (fixes.py): approved ones are pre-checked and handed to the executor; executed ones are post-checked
+4. analysed or failed incidents not yet mailed, and outcomes of approved fixes: send the email
 
 A follow-up turn is submitted before anything about it is recorded: if gpu-scheduler is unreachable the finished
 turn stays unprocessed and the next pass tries again, re-running only read-only checks.
@@ -23,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import db, evidence, investigate
+from . import db, evidence, fixes, investigate
 from .library import Library, resolve_target
 from .ops import Result, Runner
 
@@ -130,7 +131,8 @@ class Engine:
         """One pass of each stage. Returns how many things moved."""
         if self.library:
             self.library.refresh()
-        return self.start_new() + self.poll() + self.notify()
+        return self.start_new() + self.poll() + (fixes.step(self.conn, self.library, self.runner) if self.library
+                                                 else 0) + self.notify()
 
     def start_new(self) -> int:
         n = 0
@@ -251,6 +253,11 @@ class Engine:
             return 1
         if turn["session"] == "remediation":
             db.finish_turn(self.conn, turn["id"], **done)
+            rb = self.library.runbooks.get(inc["runbook"]) if self.library else None
+            name = output.get("operation")
+            if rb and name in rb.fixes and name in self.library.operations:   # the schema allows only these or "none"
+                fixes.propose(self.conn, inc, rb, self.library.operations[name])
+                log.info("incident %s: proposed fix %s (%s)", inc["id"], name, rb.fixes[name])
             db.set_status(self.conn, inc["id"], "analysed", advice=output,
                           analysis=investigate.render_analysis(inc["findings"], output),
                           analysis_model=job.get("ran_model") or turn["model"], analysis_worker=job.get("worker"))
@@ -288,16 +295,18 @@ class Engine:
             log.info("incident %s: turn %d asked for %s", inc["id"], n, asked)
             return 1
         findings = output.get("findings") or {}
-        messages = investigate.remediation_messages(inc, rb, inc["target"], findings, self.cfg.primer())
+        fix_names, fixes_txt = investigate.fixes_text(rb, self.library.operations)
+        messages = investigate.remediation_messages(inc, rb, inc["target"], findings, self.cfg.primer(), fixes_txt)
+        schema = investigate.advice_schema(fix_names)
         try:
-            job_id = self.gpu.submit(messages, investigate.ADVICE, self.cfg.investigate_max_new_tokens)
+            job_id = self.gpu.submit(messages, schema, self.cfg.investigate_max_new_tokens)
         except Exception as e:
             log.warning("submit of remediation for incident %s failed: %s", inc["id"], e)
             return 0
         db.finish_turn(self.conn, turn["id"], **done)
         db.add_turn(self.conn, inc["id"], session="remediation", prompt_version=investigate.PROMPT_VERSION,
                     model=self.cfg.model, fallback=self.cfg.fallback or None, messages=messages, gpu_job_id=job_id,
-                    turn=n + 1, json_schema=investigate.ADVICE)
+                    turn=n + 1, json_schema=schema)
         db.set_status(self.conn, inc["id"], "advising", findings=findings)
         log.info("incident %s: findings after %d turn(s), confidence %s", inc["id"], n, findings.get("confidence"))
         return 1
@@ -314,6 +323,14 @@ class Engine:
                 log.warning("email for incident %s failed: %s", inc["id"], e)
                 continue
             db.mark_notified(self.conn, inc["id"])
+            n += 1
+        for run in db.op_runs_to_notify(self.conn):
+            try:
+                self.notifier.send_fix(run, db.get_incident(self.conn, run["incident_id"]))
+            except Exception as e:
+                log.warning("email for fix run %s failed: %s", run["id"], e)
+                continue
+            db.mark_op_run_notified(self.conn, run["id"], run["status"])
             n += 1
         return n
 

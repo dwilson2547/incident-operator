@@ -85,8 +85,9 @@ def replay_runbook(inc: dict, lib: Library, gpu: GpuScheduler, cfg: Config, time
         results = [check(a) for a in asked if a in menu]
         messages = investigate.next_messages(messages, text, results, [a for a in asked if a not in menu],
                                              investigate.MAX_ROUNDS - 1 - n)
-    advice, _, _ = _ask(gpu, investigate.remediation_messages(inc, rb, inc["target"], findings, cfg.primer()),
-                        investigate.ADVICE, cfg, timeout)
+    fixes, fixes_txt = investigate.fixes_text(rb, lib.operations)
+    advice, _, _ = _ask(gpu, investigate.remediation_messages(inc, rb, inc["target"], findings, cfg.primer(), fixes_txt),
+                        investigate.advice_schema(fixes), cfg, timeout)
     return {"runbook": f"{rb.name}@{rb.rev}", "model": model, "turns": turns, "findings": findings, "advice": advice}
 
 

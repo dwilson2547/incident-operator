@@ -1,5 +1,6 @@
-"""One email per incident once its triage is done (or failed), alongside Alertmanager's own alert email (design §10).
-Same SMTP settings and env names as scrape-job-manager's notifier."""
+"""One email per incident once its triage is done (or failed), alongside Alertmanager's own alert email (design §10),
+saying when a fix awaits approval; then one short email per outcome of an approved fix. Same SMTP settings and env
+names as scrape-job-manager's notifier."""
 from __future__ import annotations
 
 import logging
@@ -65,6 +66,15 @@ def compose(inc: dict, cfg: SmtpConfig) -> EmailMessage:
                   f"Answered by {inc.get('analysis_model') or '?'} on {inc.get('analysis_worker') or '?'}"
                   + (f" after {turns} investigation turn{'s' if turns != 1 else ''}" if turns else "")
                   + ". Suggestion only: nothing was changed."]
+        for f in inc.get("fixes") or []:
+            if f["status"] == "proposed":
+                lines += ["", f"Proposed fix, waiting for your approval: {f['operation']}", f"  {f['command']}",
+                          "  Approve or reject it on the incident page; pre-checks run when you approve."]
+            elif f["status"] == "suggested":
+                lines += ["", f"Suggested fix (not run automatically; to do it yourself): {f['operation']}",
+                          f"  {f['command']}"]
+            elif f["status"] == "refused":
+                lines += ["", f"The model proposed {f['operation']}, but it can't run here: {f.get('error')}"]
     else:
         lines += [f"The model couldn't analyse this one: {inc.get('error') or 'unknown error'}."]
     ev = inc.get("evidence") or []
@@ -80,16 +90,46 @@ def compose(inc: dict, cfg: SmtpConfig) -> EmailMessage:
     return msg
 
 
+FIX_OUTCOME = {"succeeded": "done, post-checks passed", "post_failed": "ran, but the post-checks FAILED",
+               "failed": "FAILED to run", "refused": "not run: refused", "rejected": "rejected"}
+
+
+def compose_fix(run: dict, inc: dict, cfg: SmtpConfig) -> EmailMessage:
+    msg = EmailMessage()
+    msg["Subject"] = f"[triage] fix {run['operation']}: {FIX_OUTCOME.get(run['status'], run['status'])}"
+    msg["From"], msg["To"] = cfg.sender, ", ".join(cfg.to)
+    lines = [f"Incident {inc['id']}: {inc['alertname']}", f"Fix: {run['operation']}, approved by {run.get('decided_by')}",
+             f"  {run.get('command') or ''}", ""]
+    if run.get("result"):
+        lines.append(f"What it did: {run['result']}")
+    if run.get("checks"):
+        lines += ["Checks:"] + [f"  {c}" for c in run["checks"].splitlines()]
+    if run.get("error"):
+        lines.append(f"Problem: {run['error']}")
+    if cfg.public_url:
+        lines += ["", f"Incident: {cfg.public_url}/#/incident/{inc['id']}"]
+    msg.set_content("\n".join(lines))
+    return msg
+
+
 class Notifier:
     def __init__(self, cfg: SmtpConfig):
         self.cfg = cfg
 
     def send_incident(self, inc: dict) -> None:
         msg = compose(inc, self.cfg)
+        self._send(msg)
+        log.info("mailed incident %s to %s", inc["id"], ", ".join(self.cfg.to))
+
+    def send_fix(self, run: dict, inc: dict) -> None:
+        msg = compose_fix(run, inc, self.cfg)
+        self._send(msg)
+        log.info("mailed fix run %s (%s) to %s", run["id"], run["status"], ", ".join(self.cfg.to))
+
+    def _send(self, msg: EmailMessage) -> None:
         with smtplib.SMTP(self.cfg.host, self.cfg.port, timeout=30) as s:
             if self.cfg.starttls:
                 s.starttls(context=ssl.create_default_context())
             if self.cfg.username:
                 s.login(self.cfg.username, self.cfg.password)
             s.send_message(msg)
-        log.info("mailed incident %s to %s", inc["id"], ", ".join(self.cfg.to))

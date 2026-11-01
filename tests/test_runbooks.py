@@ -60,7 +60,7 @@ def test_bad_files_are_rejected_and_the_last_good_version_stays(lib_dirs):
     (lib_dirs / "runbooks" / "long.md").write_text(
         "---\nname: long\ndescription: x\nmatch: {alertname: A}\n---\n" + "word " * 1200)
     lib.refresh()
-    assert "phase 3" in lib.errors["operations/fix.yaml"] and "over 1200" in lib.errors["runbooks/long.md"]
+    assert "run.verb" in lib.errors["operations/fix.yaml"] and "over 1200" in lib.errors["runbooks/long.md"]
 
 
 def test_operation_validation(lib_dirs):

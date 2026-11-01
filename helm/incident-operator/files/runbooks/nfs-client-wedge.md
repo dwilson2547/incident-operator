@@ -7,7 +7,7 @@ match: {alertname: NodeLoadHighCPUIdle}
 priority: 100
 target: {kind: Node, from: instanceToNode}
 precursors: [node-load-cpu-6h, node-failedmount-events, nfs-dstate]
-operations: [tower-load, nodes-load-now, node-status]
+operations: [tower-load, nodes-load-now, node-status, {restart-csi-nfs-node: {autonomy: approve}}]
 sourceDocs:
   - infra/cluster-config/docs/issues/2026_10_18_unraid_nfs_v41_client_wedge.md
   - infra/cluster-config/docs/postgres_backup.md
@@ -34,10 +34,9 @@ ContainerCreating with FailedMount timeouts. Not this runbook: high load with bu
 
 ## Remediation
 - Stuck mount.nfs on this node, parents_are_csi_nfs_node true, only this node affected and Tower looks normal:
-  restart the node's csi-nfs-node pod (kube-system, the csi-nfs-node DaemonSet's pod on this node). The stuck
-  mounts are its children and die with it.
+  propose restart-csi-nfs-node. The stuck mounts are the CSI pod's children and die with it.
 - mount_nfs_dstate_total 0 and load normal: the condition has cleared; nothing to do.
-- Tower load also high, or several nodes affected: do not restart; escalate "check Tower's nfsd for stuck threads
+- Tower load also high, or several nodes affected: do not restart (operation none); escalate "check Tower's nfsd for stuck threads
   (needs root on Tower)".
 - Stuck mounts come back after the restart: escalate "reboot the node".
 - Never suggest testing with a new NFS mount from a cluster node: it wedges that node too.
