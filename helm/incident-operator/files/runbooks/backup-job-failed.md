@@ -8,7 +8,7 @@ match:
 priority: 10
 target: {kind: Job, name: job_name, namespace: namespace}
 precursors: [job-status, cronjob-history]
-operations: [job-logs-long, tower-load]
+operations: [job-logs-long, tower-load, cronjob-status, rerun-backup-job]
 ---
 
 ## What this looks like
@@ -39,6 +39,7 @@ there is no success for a day or more. So the question is whether the next run w
 - Hung on the NFS share with Tower loaded: escalate "check Tower and the NFS client on the node"; the next run will
   hang too. Never suggest testing with a new NFS mount from a cluster node.
 - A one-off network or upstream error with a good history: the next scheduled run will likely succeed; say when to
-  check.
+  check. If that is days away (the weekly offsite backup), propose rerun-backup-job.
+- Never rerun after OOMKilled, a hang, credentials, permissions or config errors: it fails the same way.
 - Credentials, permissions or a full disk: name the secret or volume to fix. Retrying won't help.
 - The failed Job keeps its alert firing until it is deleted; say to delete it once the cause is understood.

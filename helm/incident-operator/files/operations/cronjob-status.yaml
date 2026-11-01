@@ -1,0 +1,11 @@
+name: cronjob-status
+description: The CronJob behind the failed Job - whether it is suspended, any run active now, and its last scheduled and last successful times.
+mutating: false
+params:
+  namespace: {from: alertLabel:namespace}
+  cronjob: {from: alertLabel:cronjob}
+run:
+  kind: k8s-get
+  path: /apis/batch/v1/namespaces/{namespace}/cronjobs/{cronjob}
+  fields: [spec.schedule, spec.suspend, status.active, status.lastScheduleTime, status.lastSuccessfulTime]
+budget: {maxChars: 800}

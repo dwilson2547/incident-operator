@@ -1,0 +1,23 @@
+name: rerun-backup-job
+description: Start the backup CronJob's job now, as kubectl create job --from=cronjob would, instead of waiting for its next schedule.
+mutating: true
+autonomy: suggest
+params:
+  namespace: {from: alertLabel:namespace}
+  cronjob: {from: alertLabel:cronjob}
+# Not while a run is going (the manual Job isn't covered by the CronJob's concurrencyPolicy), and not when someone
+# suspended the CronJob on purpose. status.active is left out of a CronJob's status when nothing runs.
+pre:
+  - {op: cronjob-status, expect: "status.active == null"}
+  - {op: cronjob-status, expect: "spec.suspend == false"}
+run:
+  verb: CreateJobFrom
+  namespaces: [postgres, offsite-backup, secrets-backup]
+  namespace: "{namespace}"
+  cronjob: "{cronjob}"
+# The rerun started; whether the backup then succeeds is what the backup alerts already watch (some runs take hours).
+post:
+  settle: 90
+  checks:
+    - {op: cronjob-recent-start, expect: "started.0.value >= 1"}
+limits: {perTarget: 1/6h, global: 3/24h}

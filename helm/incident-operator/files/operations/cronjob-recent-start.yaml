@@ -1,0 +1,11 @@
+name: cronjob-recent-start
+description: How many Jobs of the CronJob started in the last 10 minutes (kube-state-metrics), scheduled or manual.
+mutating: false
+params:
+  namespace: {from: alertLabel:namespace}
+  cronjob: {from: alertLabel:cronjob}
+run:
+  kind: promql
+  queries:
+    started: 'count(kube_job_status_start_time{namespace="{namespace}"} > time() - 600 and on(namespace, job_name) kube_job_owner{owner_kind="CronJob", owner_name="{cronjob}"})'
+budget: {maxChars: 300}
