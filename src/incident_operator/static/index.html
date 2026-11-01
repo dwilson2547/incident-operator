@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Incidents</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #121211; --surface: #1a1a19; --surface-2: #232321; --border: #33332f;
+  --text: #f0efec; --text-2: #c3c2b7; --muted: #8d8c84; --accent: #3987e5;
+  --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f4f2; --surface: #fcfcfb; --surface-2: #f0f0ed; --border: #dcdcd6;
+  --text: #0b0b0b; --text-2: #52514e; --muted: #77766f; --accent: #2a78d6;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+a { color: var(--accent); text-decoration: none; cursor: pointer; }
+button { font: inherit; color: var(--text); background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--border);
+  background: var(--surface); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
+header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+.spacer { flex: 1; }
+.muted { color: var(--muted); }
+main { padding: 16px; max-width: 1300px; margin: 0 auto; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); margin: 22px 0 8px; font-weight: 600; }
+h2:first-child { margin-top: 0; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--text-2); font-weight: 500; font-size: 12px; white-space: nowrap; }
+td.n { text-align: right; white-space: nowrap; }
+tbody tr.click { cursor: pointer; }
+tbody tr.click:hover { background: var(--surface-2); }
+.tag { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 1px 8px; border-radius: 99px;
+  background: var(--surface-2); border: 1px solid var(--border); white-space: nowrap; }
+.tag::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--c, var(--muted)); }
+.s-new, .s-triaging { --c: var(--warning); } .s-analysed { --c: var(--good); } .s-triage_failed { --c: var(--critical); }
+.sev-critical { --c: var(--critical); } .sev-warning { --c: var(--warning); }
+.preview { color: var(--text-2); max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.empty { padding: 28px; text-align: center; color: var(--muted); }
+.banner { background: color-mix(in srgb, var(--critical) 18%, var(--surface)); border: 1px solid var(--critical);
+  padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; }
+.hidden { display: none !important; }
+.grid2 { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; align-items: start; }
+@media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; font-size: 13px; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; word-break: break-word; }
+.answer { white-space: pre-wrap; font-size: 14.5px; line-height: 1.55; }
+pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; overflow: auto;
+  max-height: 420px; margin: 6px 0 0; font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; }
+details { margin-top: 8px; } summary { cursor: pointer; color: var(--text-2); }
+.err { color: var(--critical); }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="#/" style="color:inherit">Incidents</a></h1>
+  <span class="muted" style="font-size:12px">suggest-only triage · phase 1</span>
+  <div class="spacer"></div>
+  <span class="muted" style="font-size:12px" id="updated"></span>
+  <button id="theme" title="Toggle light/dark">◐</button>
+</header>
+<main>
+  <div class="banner hidden" id="banner"></div>
+  <div id="view-list">
+    <div class="grid2">
+      <div><h2>Incidents</h2><div class="card scroll" style="padding:0" id="incidents"><div class="empty">Loading…</div></div></div>
+      <div><h2>Needs a runbook</h2><div class="card scroll" style="padding:0" id="runbooks"><div class="empty">Loading…</div></div></div>
+    </div>
+  </div>
+  <div id="view-incident" class="hidden"></div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const dur = s => { s = Math.max(0, s); return s < 60 ? Math.round(s) + "s" : s < 3600 ? Math.round(s / 60) + "m" : s < 86400 ? (s / 3600).toFixed(1) + "h" : (s / 86400).toFixed(1) + "d"; };
+const ago = t => t ? dur((Date.now() - new Date(t)) / 1000) + " ago" : "–";
+const clock = t => t ? new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "–";
+const TARGET = ["namespace", "pod", "job_name", "deployment", "statefulset", "daemonset", "node", "instance"];
+const target = l => TARGET.filter(k => l[k]).map(k => `${k}=${l[k]}`).join(" ");
+const STATUS = { new: "new", triaging: "triaging", analysed: "analysed", triage_failed: "triage failed" };
+const state = { lastOk: null };
+const lget = k => { try { return localStorage.getItem("io." + k); } catch { return null; } };
+const lset = (k, v) => { try { localStorage.setItem("io." + k, v); } catch {} };
+function theme(t) { if (t === "light") document.documentElement.dataset.theme = "light"; else delete document.documentElement.dataset.theme; }
+theme(lget("theme"));
+$("#theme").onclick = () => { const t = document.documentElement.dataset.theme === "light" ? "dark" : "light"; lset("theme", t); theme(t); };
+
+async function api(path) {
+  const r = await fetch(path, { headers: { Accept: "application/json" } });
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return r.json();
+}
+function failing(err) {
+  $("#banner").classList.toggle("hidden", !err);
+  if (err) $("#banner").textContent = `Can't reach the server (${err.message}). Retrying; showing data from ${state.lastOk ? ago(state.lastOk) : "never"}.`;
+}
+setInterval(() => { $("#updated").textContent = state.lastOk ? "updated " + ago(state.lastOk) : ""; }, 1000);
+
+async function refresh() {
+  const m = location.hash.match(/^#\/incident\/(\d+)/);
+  $("#view-list").classList.toggle("hidden", !!m);
+  $("#view-incident").classList.toggle("hidden", !m);
+  try {
+    if (m) renderIncident(await api("/api/incidents/" + m[1]));
+    else renderList(await api("/api/incidents"));
+    state.lastOk = new Date(); failing(null);
+  } catch (e) {
+    if (m && e.message.startsWith("404")) $("#view-incident").innerHTML = `<div class="card empty">Incident ${esc(m[1])} doesn't exist. <a href="#/">All incidents</a></div>`;
+    else failing(e);
+  }
+}
+
+function renderList(d) {
+  $("#incidents").innerHTML = d.incidents.length ? `<table><thead><tr><th>When</th><th>Alert</th><th>Target</th><th>Status</th><th>Answered by</th><th>Suggestion</th></tr></thead><tbody>
+    ${d.incidents.map(i => `<tr class="click" data-id="${i.id}">
+      <td title="${esc(clock(i.first_seen))}" style="white-space:nowrap">${ago(i.first_seen)}${i.alert_resolved_at ? `<div class="muted" style="font-size:12px">resolved</div>` : ""}</td>
+      <td><span class="tag sev-${esc(i.severity || "")}">${esc(i.alertname)}</span></td>
+      <td class="muted" style="font-size:12.5px">${esc(target(i.labels)) || "–"}</td>
+      <td><span class="tag s-${esc(i.status)}">${esc(STATUS[i.status] || i.status)}</span></td>
+      <td style="white-space:nowrap">${i.analysis_model ? `${esc(i.analysis_model)}<div class="muted" style="font-size:12px">${esc(i.analysis_worker || "")}</div>` : "–"}</td>
+      <td class="preview" title="${esc(i.analysis_preview || "")}">${esc(i.analysis_preview || "")}</td></tr>`).join("")}</tbody></table>`
+    : `<div class="empty">No incidents yet. They appear when Alertmanager sends an alert that's routed here (the ones that are also mailed).</div>`;
+  document.querySelectorAll("#incidents tr.click").forEach(r => r.onclick = () => location.hash = "#/incident/" + r.dataset.id);
+  $("#runbooks").innerHTML = d.needs_runbook.length ? `<table><thead><tr><th>Alert</th><th class="n">Incidents</th><th class="n">Open</th><th>Last</th></tr></thead><tbody>
+    ${d.needs_runbook.map(r => `<tr><td>${esc(r.alertname)}</td><td class="n">${r.incidents}</td><td class="n">${r.open}</td><td class="muted">${ago(r.last_seen)}</td></tr>`).join("")}</tbody></table>
+    <p class="muted" style="margin:8px 12px;font-size:12px">Alerts that fired with no runbook. A runbook for the most frequent ones gives the model the evidence and context it's missing.</p>`
+    : `<div class="empty">Nothing yet.</div>`;
+}
+
+function renderIncident(i) {
+  const turn = i.turns[i.turns.length - 1];
+  const ann = i.annotations || {};
+  const msgs = turn ? turn.messages : [];
+  // The page refreshes every 10 s: keep open/closed sections as the user left them (same incident only).
+  const view = $("#view-incident"), keep = view.dataset.id === String(i.id);
+  const was = keep ? [...view.querySelectorAll("details")].map(d => d.open) : null;
+  view.dataset.id = i.id;
+  view.innerHTML = `
+    <p><a href="#/">← All incidents</a></p>
+    <div class="grid2">
+      <div>
+        <h2>${esc(i.alertname)} <span class="tag s-${esc(i.status)}" style="text-transform:none">${esc(STATUS[i.status] || i.status)}</span></h2>
+        <div class="card">
+          ${i.status === "analysed" ? `<div class="answer">${esc(i.analysis)}</div>
+              <p class="muted" style="margin:12px 0 0;font-size:12.5px">Answered by <b>${esc(i.analysis_model)}</b> on ${esc(i.analysis_worker || "?")}${turn && turn.ran_model && turn.ran_model !== turn.model ? ` (fallback from ${esc(turn.model)})` : ""} · suggestion only, nothing was changed</p>`
+            : i.status === "triage_failed" ? `<div class="err">The model couldn't analyse this: ${esc(i.error || "unknown error")}</div>`
+            : `<div class="muted">${i.status === "new" ? "Collecting evidence…" : "Waiting for the model…"} This page refreshes on its own.</div>`}
+        </div>
+        <h2>Evidence the model was given</h2>
+        <div class="card">${i.evidence.length ? i.evidence.map(e => `<details ${e.kind === "logs" ? "" : "open"}><summary>${esc(e.source)}${e.truncated ? " <span class='muted'>(truncated)</span>" : ""}</summary>
+            ${e.content != null ? `<pre>${esc(e.content)}</pre>` : `<div class="err" style="margin-top:6px">could not read: ${esc(e.error)}</div>`}</details>`).join("")
+          : `<div class="muted">None: the alert names no pod, job, workload or node.</div>`}</div>
+        ${turn ? `<h2>Prompt</h2><div class="card"><details><summary>Exactly what was sent (${esc(turn.prompt_version)}, to ${esc(turn.model)}${turn.fallback ? ", fallback " + esc(turn.fallback.join(", ")) : ""})</summary>
+            ${msgs.map(m => `<div class="muted" style="margin-top:10px">${esc(m.role)}</div><pre>${esc(m.content)}</pre>`).join("")}</details></div>` : ""}
+      </div>
+      <div>
+        <h2>Alert</h2>
+        <div class="card"><dl class="kv">
+          <dt>Severity</dt><dd>${esc(i.severity || "–")}</dd>
+          <dt>Firing since</dt><dd>${clock(i.starts_at || i.first_seen)}</dd>
+          <dt>Last sent</dt><dd>${ago(i.last_seen)}</dd>
+          <dt>Resolved</dt><dd>${i.alert_resolved_at ? clock(i.alert_resolved_at) : "no"}</dd>
+          <dt>Mailed</dt><dd>${i.notified_at ? clock(i.notified_at) : "not yet"}</dd>
+          <dt>Runbook</dt><dd>${esc(i.runbook || "none yet")}</dd>
+          ${Object.entries(ann).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}
+          ${Object.entries(i.labels).filter(([k]) => k !== "alertname").map(([k, v]) => `<dt>${esc(k)}</dt><dd class="muted">${esc(v)}</dd>`).join("")}
+        </dl>${i.generator_url ? `<p style="margin:10px 0 0"><a href="${esc(i.generator_url)}" target="_blank" rel="noopener">Open in Prometheus</a></p>` : ""}</div>
+        ${turn && turn.result ? `<h2>Model call</h2><div class="card"><dl class="kv">
+          <dt>Input tokens</dt><dd>${esc(turn.result.input_tokens ?? "–")}</dd><dt>Output tokens</dt><dd>${esc(turn.result.output_tokens ?? "–")}</dd>
+          <dt>Took</dt><dd>${turn.finished_at ? dur((new Date(turn.finished_at) - new Date(turn.submitted_at)) / 1000) : "–"}</dd>
+          <dt>gpu-scheduler job</dt><dd class="muted" style="font-size:12px">${esc(turn.gpu_job_id)}</dd></dl></div>` : ""}
+      </div>
+    </div>`;
+  if (was) view.querySelectorAll("details").forEach((d, k) => { if (k < was.length) d.open = was[k]; });
+}
+
+window.addEventListener("hashchange", refresh);
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 10000);
+</script>
+</body>
+</html>
