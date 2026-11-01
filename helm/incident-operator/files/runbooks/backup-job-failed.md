@@ -18,7 +18,9 @@ there is no success for a day or more. So the question is whether the next run w
 ## Investigation
 - job-status: the Job's condition. DeadlineExceeded means the run hung or was too slow, most often on the NFS
   backup share; BackoffLimitExceeded means the container failed with an error, which is in the pod's logs.
-- Exit code 137 or OOMKilled: the copy tool ran out of memory (rclone and pg_dump on large data).
+- Exit code 137 or OOMKilled: the copy tool ran out of memory (rclone and pg_dump on large data; rclone listing a
+  big bucket counts). rclone's "Config file not found - using defaults" is normal here: its remotes come from
+  environment variables. It is never the cause.
 - Log lines with "permission denied", "no space left", authentication or connection errors name the cause directly.
 - If the log tail stops before the error, ask for job-logs-long.
 - cronjob-history: several failures in 7 days point at a lasting cause; a first failure after many successes at a

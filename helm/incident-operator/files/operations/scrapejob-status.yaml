@@ -1,5 +1,5 @@
 name: scrapejob-status
-description: The ScrapeJob as scrape-job-manager sees it - phase, consecutive failures, the last run (result, attempts, items, its Kubernetes Job), the last success and recent item counts.
+description: The ScrapeJob as scrape-job-manager sees it - phase, consecutive failures, the last run (result, exit code, error, its Kubernetes Job), the last success, recent item counts and phase changes.
 mutating: false
 params:
   namespace: {from: target.namespace}
@@ -8,5 +8,5 @@ run:
   kind: k8s-get
   path: /apis/scrape.danwils.com/v1alpha1/namespaces/{namespace}/scrapejobs/{name}
   fields: [status.phase, status.consecutiveFailures, status.lastRun, status.lastSuccess, status.recentItems,
-           status.baselineItems, status.stale, status.suspended, spec.scraperRef, spec.poolRef]
+           status.baselineItems, status.stale, status.suspended, status.events, spec.scraperRef]
 budget: {maxChars: 2500}

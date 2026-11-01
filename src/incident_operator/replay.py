@@ -64,7 +64,7 @@ def replay_runbook(inc: dict, lib: Library, gpu: GpuScheduler, cfg: Config, time
         if not isinstance(out, dict):
             return {"runbook": rb.name, "turns": turns, "error": f"reply wasn't JSON: {text[:200]}"}
         asked = list(dict.fromkeys(out.get("requests") or []))
-        if out.get("action") != "request" or not asked or n >= investigate.MAX_ROUNDS:
+        if not asked or n >= investigate.MAX_ROUNDS:
             findings = out.get("findings") or {}
             break
         results = [stored.get(a) or missing(a) for a in asked if a in menu]

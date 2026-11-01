@@ -210,8 +210,8 @@ def test_investigation_requests_a_check_then_finishes_and_gets_advice(conn, tmp_
     inc = db.get_incident(conn, inc_id)
     assert inc["status"] == "analysed" and inc["runbook"] == "pod-crashloop" and inc["runbook_rev"]
     assert inc["target"] == {"kind": "Pod", "name": "web-7d9f8-abcde", "namespace": "n"}
-    assert [(e_["trigger"], e_["operation"]) for e_ in inc["evidence"]] == [("precursor", "pod-status"),
-                                                                           ("requested", "pod-memory-6h")]
+    assert [(e_["trigger"], e_["operation"]) for e_ in inc["evidence"]] == [
+        ("precursor", "pod-status"), ("precursor", "pod-previous-logs"), ("requested", "pod-memory-6h")]
     assert [(t["session"], t["turn"]) for t in inc["turns"]] == [("investigation", 1), ("investigation", 2),
                                                                  ("remediation", 3)]
     first_user = gpu.submitted[0][0][1]["content"]
@@ -252,6 +252,19 @@ def test_gpu_outage_mid_loop_resumes(conn, tmp_path):
     gpu.down = False
     e.step(); e.step()
     assert db.get_incident(conn, inc_id)["status"] == "analysed"
+
+
+@needs_pg
+def test_checks_listed_with_done_still_run_while_rounds_remain(conn, tmp_path):
+    gpu = ScriptedGpu([{"action": "done", "requests": ["pod-restarts-6h"], "reason": "r", "findings": FINDINGS},
+                       {"action": "done", "requests": [], "reason": "r", "findings": FINDINGS}, ADVICE])
+    e = engine(conn, gpu, tmp_path)
+    inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    for _ in range(4):
+        e.step()
+    inc = db.get_incident(conn, inc_id)
+    assert inc["status"] == "analysed" and [t["session"] for t in inc["turns"]] == ["investigation"] * 2 + ["remediation"]
+    assert any(x["operation"] == "pod-restarts-6h" for x in inc["evidence"])
 
 
 @needs_pg

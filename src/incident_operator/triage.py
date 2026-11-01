@@ -265,7 +265,9 @@ class Engine:
         n = turn["turn"]
         menu, _ = investigate.menu_text(rb, self.library.operations)
         asked = list(dict.fromkeys(output.get("requests") or []))
-        if output.get("action") == "request" and asked and n < investigate.MAX_ROUNDS:
+        # Checks listed with "done" still run while rounds remain: seen in prod (a 9B listed the log it needed and
+        # finished anyway). Read-only, so running one too many costs a turn, never a change.
+        if asked and n < investigate.MAX_ROUNDS:
             earlier = {e["operation"]: Result(e["operation"], e["source"], e["content"], e["data"], e["truncated"],
                                               e["error"]) for e in inc["evidence"] if e["operation"]}
             run = [a for a in asked if a in menu]
