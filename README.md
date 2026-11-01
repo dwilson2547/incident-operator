@@ -37,7 +37,7 @@ operations: [tower-load, {restart-csi-nfs-node: {autonomy: approve}}]    # in th
 
 | Fix | Verb | Pre | Post (after 120 s) | Autonomy |
 |---|---|---|---|---|
-| `restart-csi-nfs-node` | delete the node's `csi-nfs-node` pod | stuck `mount.nfs` older than 10 min, children of the CSI pod | no stuck `mount.nfs`; DaemonSet fully available | `suggest`, `approve` in `nfs-client-wedge` |
+| `restart-csi-nfs-node` | delete the node's `csi-nfs-node` pod | stuck `mount.nfs` older than 10 min, children of the CSI pod; only this node wedged; Tower under 1.0 load per core | no stuck `mount.nfs`; DaemonSet fully available | `suggest`, `approve` in `nfs-client-wedge` |
 | `rerun-backup-job` | a Job from the backup CronJob (postgres, offsite-backup, secrets-backup) | no run active; not suspended | (90 s) a Job of the CronJob started; the backup alerts judge the result | `suggest` in `backup-job-failed` |
 
 Checks are `<path> <op> <literal>` on a read-only operation's structured result (`==`, `!=`, `>`, `>=`, `<`, `<=`;

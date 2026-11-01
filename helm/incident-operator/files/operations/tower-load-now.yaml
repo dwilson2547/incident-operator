@@ -1,0 +1,8 @@
+name: tower-load-now
+description: Tower's (the NFS server's) 15-minute load per core right now; no data means Tower's exporter isn't answering.
+mutating: false
+run:
+  kind: promql
+  queries:
+    load15_per_core: 'max(node_load15{job="tower-node"}) / count(node_cpu_seconds_total{job="tower-node", mode="idle"})'
+budget: {maxChars: 300}

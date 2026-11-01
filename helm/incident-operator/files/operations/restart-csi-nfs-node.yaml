@@ -6,9 +6,17 @@ params:
   node: {from: target.name}
 # Fresh probe at approval time: still wedged (not a slow mount), and the stuck mounts are the CSI pod's children, so
 # deleting it is what clears them (2026-10-22: 102 mount.nfs died with it).
+#
+# And the runbook's "don't restart" conditions, in code rather than left to the model: one wedged node, not several
+# (several means the server), and Tower not loaded (a deadlocked nfsd would wedge the node again). Tower's threshold:
+# over 14 days (from 2026-10-21, when its exporter started) load per core was median 0.02, p99 0.28, max 0.75, the max
+# during the 10-22 worker1 client wedge that this fix cleared. ⚠ Not calibrated against a Tower-side deadlock: none has
+# happened since Tower was monitored. No Tower data refuses too.
 pre:
   - {op: nfs-dstate, expect: "mount_nfs_dstate_older_than_10m > 0"}
   - {op: nfs-dstate, expect: "parents_are_csi_nfs_node == true"}
+  - {op: nodes-wedged-now, expect: "wedged.0.value <= 1"}
+  - {op: tower-load-now, expect: "load15_per_core.0.value < 1"}
 run:
   verb: DeletePods
   namespaces: [kube-system]

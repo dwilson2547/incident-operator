@@ -1,0 +1,16 @@
+name: nodes-wedged-now
+description: How many cluster nodes match the NFS wedge signature right now (load15 over 2x cores with CPU under half busy).
+mutating: false
+run:
+  kind: promql
+  queries:
+    # NodeLoadHighCPUIdle's expression (cluster-config cluster-alerts.yaml) without its `for`; `or vector(0)` so that
+    # none is 0 rather than no data.
+    wedged: >-
+      count(
+        max by (instance) (node_load15{job="node-exporter"})
+          / count by (instance) (node_cpu_seconds_total{job="node-exporter", mode="idle"}) > 2
+        and on(instance)
+        (1 - avg by (instance) (rate(node_cpu_seconds_total{job="node-exporter", mode="idle"}[10m]))) < 0.5
+      ) or vector(0)
+budget: {maxChars: 300}

@@ -48,6 +48,24 @@ class ProbeStub(Runner):
         return Result(op.name, f"probe on {params['node']}", str(self.dstate), data=dict(self.dstate))
 
 
+class ClusterProm(FakeProm):
+    """Prometheus for the fix's checks: `wedged` nodes and Tower's load per core, settable per test."""
+
+    def __init__(self, wedged=1, tower=0.05):
+        super().__init__()
+        self.wedged, self.tower = wedged, tower
+
+    def get(self, path, params):
+        q = params["query"]
+        if "tower-node" in q and "node_load15" in q and path.endswith("/query"):
+            self.queries.append(q)
+            return {"result": [{"metric": {}, "value": [0, str(self.tower)]}] if self.tower is not None else []}
+        if q.startswith("count(") and "or vector(0)" in q:
+            self.queries.append(q)
+            return {"result": [{"metric": {}, "value": [0, str(self.wedged)]}]}
+        return super().get(path, params)
+
+
 class Mailbox:
     def __init__(self):
         self.incidents, self.fixes = [], []
@@ -73,7 +91,7 @@ def cluster(pods=1, ds_unavailable=None):
 
 def setup(conn, tmp_path, replies=None, k8s=None, lib=None):
     k8s = k8s or cluster()
-    runner = ProbeStub(k8s, FakeProm())
+    runner = ProbeStub(k8s, ClusterProm())
     runner.dstate = WEDGED
     mail = Mailbox()
     primer = tmp_path / "primer.md"
@@ -163,9 +181,9 @@ def test_proposed_approved_executed_and_verified(conn, tmp_path):
     assert approve(conn, run["id"]).status_code == 409                # once
     e.step()                                                          # pre-checks against a fresh probe
     r = db.get_op_run(conn, run["id"])
-    assert r["status"] == "ready" and r["decided_by"] == "anonymous (local)" and r["checks"].count("pass:") == 2
+    assert r["status"] == "ready" and r["decided_by"] == "anonymous (local)" and r["checks"].count("pass:") == 4
     pre = [x for x in db.get_incident(conn, inc["id"])["evidence"] if x["trigger"] == "pre"]
-    assert [x["operation"] for x in pre] == ["nfs-dstate"]            # one probe for both expectations
+    assert [x["operation"] for x in pre] == ["nfs-dstate", "nodes-wedged-now", "tower-load-now"]   # one probe for two
 
     lib = Library(None, str(CHART / "operations"))
     assert executor.step(conn, lib, k8s) == 1
@@ -209,6 +227,21 @@ def test_pre_check_refuses_when_the_wedge_has_cleared(conn, tmp_path):
     r = db.get_op_run(conn, run["id"])
     assert r["status"] == "refused" and "FAIL" in r["checks"] and not k8s.deleted
     assert mail.fixes[-1]["status"] == "refused"
+
+
+@needs_pg
+@pytest.mark.parametrize("wedged, tower, why", [
+    (3, 0.05, "FAIL: nodes-wedged-now expects wedged.0.value <= 1; wedged.0.value = 3"),     # the server, not this node
+    (1, 2.5, "FAIL: tower-load-now expects load15_per_core.0.value < 1"),                    # Tower's nfsd in trouble
+    (1, None, "FAIL: tower-load-now expects load15_per_core.0.value < 1; load15_per_core.0.value = null"),
+])
+def test_pre_check_refuses_when_the_server_is_the_problem(conn, tmp_path, wedged, tower, why):
+    e, k8s, runner, mail = setup(conn, tmp_path)
+    run = analysed(conn, e)["fixes"][0]
+    runner.prom.wedged, runner.prom.tower = wedged, tower
+    approve(conn, run["id"]); e.step()
+    r = db.get_op_run(conn, run["id"])
+    assert r["status"] == "refused" and why in r["checks"] and not k8s.deleted
 
 
 @needs_pg
