@@ -8,8 +8,8 @@ domains: [ai]
 Turns Alertmanager alerts into tracked incidents and has a small local LLM (through gpu-scheduler) triage each one.
 The model picks and explains; code decides what can run. Design: [`docs/design.md`](docs/design.md).
 
-**Status: phase 2a (runbooks, suggest-only), built 2026-11-01.** Nothing it does changes the cluster. Phase 2b (node
-probes) and phase 3 (approved fixes) are next (design §14).
+**Status: phase 2 (runbooks, node probes, suggest-only), built 2026-11-01.** It never changes anything; the only
+objects it creates are short read-only probe Jobs. Phase 3 (approved fixes) is next (design §14).
 
 ## Runbooks (phase 2a)
 
@@ -31,8 +31,15 @@ the generic one below (design §6):
 | `scraper-failures` | `ScrapeJobStale`, `ScrapeJobSuspended` | the ScrapeJob |
 
 Operation kinds: `k8s-summary` (pod/Job/workload/node status, events, logs), `k8s-get` (fields of any object, e.g. a
-ScrapeJob), `k8s-events` (by reason, node or object), `k8s-logs`, `promql`, `promql-range` (downsampled), and
-`alert-objects` (the generic phase-1 evidence). Parameters come from `target.*`, `alertLabel:<name>` or
+ScrapeJob), `k8s-events` (by reason, node or object), `k8s-logs`, `promql`, `promql-range` (downsampled),
+`alert-objects` (the generic phase-1 evidence), and `probe`.
+
+**Probes** (phase 2b, `probes.py`) run on the target node as a short Job in this namespace: pinned with `nodeName`,
+`hostPID` so `/proc` shows the node's tasks, and nothing else (no volumes, no service-account token, non-root, no
+capabilities, read-only root, 60 s deadline); the operator reads its one line of JSON and deletes the Job. Probes are
+named code in the image: an operation file picks one, it can't supply a command. Never a mount, so a probe can't wedge
+a node. `nfs-dstate`: D-state tasks by command, stuck `mount.nfs` (count, older than 10 min, oldest, their parents),
+stuck `nfsplugin` threads, the NFSv4 state manager thread. Run on all four nodes 2026-11-01: ~20 s each. Parameters come from `target.*`, `alertLabel:<name>` or
 `result:<operation>.<path>`, and are refused unless they look like plain names. No `logql`: Loki holds only object
 store audit logs today. Files are validated on load (references, parameter sources, the design's size limits); a bad
 file is rejected and its last good version stays live. The **Runbooks** page lists what loaded, what was rejected

@@ -54,6 +54,21 @@ class K8s:
         r.raise_for_status()
         return r.text if text else r.json()
 
+    # Used only to create and remove probe Jobs (ops.Runner._probe), in the operator's own namespace.
+    def post(self, path: str, body: dict) -> dict:
+        import httpx
+        r = httpx.post(self.base + path, json=body, timeout=15, verify=self.verify,
+                       headers={"Authorization": f"Bearer {self.token}"} if self.token else {})
+        r.raise_for_status()
+        return r.json()
+
+    def delete(self, path: str, params: dict | None = None) -> None:
+        import httpx
+        r = httpx.delete(self.base + path, params=params, timeout=15, verify=self.verify,
+                         headers={"Authorization": f"Bearer {self.token}"} if self.token else {})
+        if r.status_code != 404:
+            r.raise_for_status()
+
 
 def collect(k8s: K8s, labels: dict[str, str]) -> list[Item]:
     ns = labels.get("namespace") or labels.get("exported_namespace")

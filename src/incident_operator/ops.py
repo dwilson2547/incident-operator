@@ -106,9 +106,46 @@ def _cap(text: str, limit: int, tail: bool = False) -> tuple[str, bool]:
     return (("…" + text[-limit:]) if tail else (text[:limit] + "…")), True
 
 
+def probe_job(name: str, node: str, probe: str, image: str, deadline: int) -> dict:
+    """The probe Job (design §5.3): pinned to the node, host PID namespace so /proc shows the node's tasks, and
+    otherwise as little as Kubernetes allows: no volumes, no token, non-root, no capabilities, read-only root."""
+    return {
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {"name": name, "labels": {"app.kubernetes.io/part-of": "incident-operator",
+                                              "incident-operator/probe": probe}},
+        "spec": {
+            "backoffLimit": 0, "activeDeadlineSeconds": deadline, "ttlSecondsAfterFinished": 600,
+            "template": {
+                "metadata": {"labels": {"incident-operator/probe": probe}},
+                "spec": {
+                    "nodeName": node,                  # pinned: no scheduler, so a cordoned node can still be read
+                    "hostPID": True,
+                    "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
+                    "restartPolicy": "Never",
+                    "tolerations": [{"operator": "Exists"}],
+                    "securityContext": {"runAsNonRoot": True, "runAsUser": 65534, "runAsGroup": 65534,
+                                        "seccompProfile": {"type": "RuntimeDefault"}},
+                    "containers": [{
+                        "name": "probe", "image": image,
+                        "command": ["python", "-m", "incident_operator.probes", probe],
+                        "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
+                                            "capabilities": {"drop": ["ALL"]}},
+                        "resources": {"requests": {"cpu": "10m", "memory": "32Mi"},
+                                      "limits": {"memory": "128Mi"}},
+                    }],
+                },
+            },
+        },
+    }
+
+
 class Runner:
-    def __init__(self, k8s, prom: Prometheus | None = None):
+    def __init__(self, k8s, prom: Prometheus | None = None, probe_namespace: str | None = None,
+                 probe_image: str | None = None):
         self.k8s, self.prom = k8s, prom or Prometheus()
+        self.probe_namespace = probe_namespace or os.environ.get("PROBE_NAMESPACE")
+        self.probe_image = probe_image or os.environ.get("PROBE_IMAGE")
 
     def run(self, op: Operation, target: dict | None, labels: dict, earlier: dict[str, Result]) -> Result:
         try:
@@ -127,6 +164,8 @@ class Runner:
                 res = self._get(op, params)
             elif kind == "k8s-events":
                 res = self._events(op, params)
+            elif kind == "probe":
+                res = self._probe(op, params)
             else:
                 res = self._logs(op, params)
         except Exception as e:                          # one failed read never stops the incident
@@ -206,6 +245,41 @@ class Runner:
         text = self.k8s.get(f"/api/v1/namespaces/{ns}/pods/{pod}/log", q, text=True)
         return Result(op.name, f"logs {ns}/{pod}" + (" (previous container)" if run.get("previous") else ""),
                       text.rstrip() or "(empty)")
+
+    def _probe(self, op: Operation, params: dict) -> Result:
+        """Run a probe (probes.py) as a Job pinned to the node, wait for its one line of JSON, delete the Job.
+        The pod gets hostPID and nothing else (design §5.3). A probe that doesn't finish in time is reported as such:
+        on a wedged node that is itself a finding."""
+        import json as _json
+        import uuid
+        node, name = _fill(op.run["node"], params), op.run["probe"]
+        ns, image = self.probe_namespace, self.probe_image
+        if not (ns and image):
+            raise RuntimeError("probes are not configured (PROBE_NAMESPACE, PROBE_IMAGE)")
+        job = f"probe-{name}-{uuid.uuid4().hex[:6]}"
+        deadline = int(op.run.get("timeoutSeconds", 60))
+        self.k8s.post(f"/apis/batch/v1/namespaces/{ns}/jobs", probe_job(job, node, name, image, deadline))
+        try:
+            end = time.time() + deadline + 30                 # + time to pull the image and start
+            while time.time() < end:
+                pods = self.k8s.get(f"/api/v1/namespaces/{ns}/pods", {"labelSelector": f"job-name={job}"})["items"]
+                phase = pods[0]["status"].get("phase") if pods else None
+                if phase in ("Succeeded", "Failed"):
+                    out = self.k8s.get(f"/api/v1/namespaces/{ns}/pods/{pods[0]['metadata']['name']}/log", {},
+                                       text=True).strip().splitlines()
+                    if phase == "Failed" or not out:
+                        raise RuntimeError(f"probe pod {phase.lower()}: {(out or ['no output'])[-1][:300]}")
+                    data = _json.loads(out[-1])
+                    text = "\n".join(f"{k}: {_compact(v)}" for k, v in data.items())
+                    return Result(op.name, f"probe {name} on node {node}", text, data=data)
+                time.sleep(2)
+            raise TimeoutError(f"probe didn't finish in {deadline + 30}s on {node} (a node that can't run a "
+                               "60-second /proc read is itself in trouble)")
+        finally:
+            try:
+                self.k8s.delete(f"/apis/batch/v1/namespaces/{ns}/jobs/{job}", {"propagationPolicy": "Background"})
+            except Exception as e:                            # ttlSecondsAfterFinished cleans up anyway
+                log.warning("could not delete probe job %s: %s", job, e)
 
     def _promql(self, op: Operation, params: dict) -> Result:
         run = op.run

@@ -73,7 +73,7 @@ def test_operation_validation(lib_dirs):
 
 def test_runbook_sections(lib_dirs):
     rb = load(lib_dirs).runbooks["nfs-client-wedge"]
-    assert rb.section("Remediation").startswith("- Only this node affected")
+    assert rb.section("Remediation").startswith("- Stuck mount.nfs on this node")
     assert "Investigation" not in rb.section("Remediation")
 
 

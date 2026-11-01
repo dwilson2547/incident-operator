@@ -1,0 +1,11 @@
+name: nfs-dstate
+description: Runs on the node - tasks stuck in D state, how many are mount.nfs (and how old, and whose children), stuck nfsplugin threads, and the NFS state manager thread.
+mutating: false
+params:
+  node: {from: target.name}
+run:
+  kind: probe
+  probe: nfs-dstate
+  node: "{node}"
+  timeoutSeconds: 60
+budget: {maxChars: 1500}

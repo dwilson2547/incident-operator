@@ -69,6 +69,27 @@ roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: incident
 subjects:
   - {kind: ServiceAccount, name: incident-operator, namespace: {{ .Release.Namespace }}}
 ---
+# Probes (design §5.3): short Jobs in this namespace, pinned to a node with hostPID to read its /proc. Their pod spec
+# is fixed in code (ops.probe_job): no volumes, no token, non-root, no capabilities.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: incident-operator-probes
+  labels: {{- toYaml $labels | nindent 4 }}
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: incident-operator-probes
+  labels: {{- toYaml $labels | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: incident-operator-probes}
+subjects:
+  - {kind: ServiceAccount, name: incident-operator, namespace: {{ .Release.Namespace }}}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -110,6 +131,8 @@ spec:
             - {name: RUNBOOKS_DIR, value: /etc/incident-operator/runbooks}
             - {name: OPERATIONS_DIR, value: /etc/incident-operator/operations}
             - {name: PROMETHEUS_URL, value: {{ .Values.prometheusUrl | quote }}}
+            - {name: PROBE_NAMESPACE, value: {{ .Release.Namespace | quote }}}
+            - {name: PROBE_IMAGE, value: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"}
             - {name: TRIAGE_INVESTIGATE_MAX_NEW_TOKENS, value: {{ .Values.triage.investigateMaxNewTokens | quote }}}
             - {name: SMTP_HOST, value: {{ .Values.smtp.host | quote }}}
             - {name: SMTP_PORT, value: {{ .Values.smtp.port | quote }}}

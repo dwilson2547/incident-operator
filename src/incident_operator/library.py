@@ -25,7 +25,7 @@ log = logging.getLogger("incident_operator.library")
 
 # design §4.1, in tokens estimated as characters / 4
 BODY_MAX, BODY_WARN, REMEDIATION_MAX, DESCRIPTION_MAX = 1200, 800, 400, 60
-READ_KINDS = {"alert-objects", "k8s-summary", "k8s-get", "k8s-events", "k8s-logs", "promql", "promql-range"}
+READ_KINDS = {"alert-objects", "k8s-summary", "k8s-get", "k8s-events", "k8s-logs", "promql", "promql-range", "probe"}
 TARGET_KINDS = {"Pod", "Job", "Deployment", "StatefulSet", "DaemonSet", "Node", "ScrapeJob"}
 PARAM_SOURCE = re.compile(r"^(target\.(name|namespace|kind)|alertLabel:[A-Za-z_][A-Za-z0-9_]*|result:[a-z0-9-]+\.[\w.]+)$")
 NAME = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
@@ -146,6 +146,12 @@ def _check_run(run: dict, params: set[str]) -> None:
     elif kind == "k8s-logs":
         if not (run.get("pod") or run.get("job")) or not run.get("namespace"):
             raise LoadError("run needs namespace and pod (or job: the Job's newest pod)")
+    elif kind == "probe":
+        from .probes import PROBES
+        if run.get("probe") not in PROBES:
+            raise LoadError(f"run.probe must be one of {sorted(PROBES)} (probes are code in the image)")
+        if not run.get("node"):
+            raise LoadError("run.node is required: the node to probe, e.g. \"{node}\" from target.name")
     elif kind == "k8s-events":
         if not any(run.get(k) for k in ("reason", "host", "object")):
             raise LoadError("run needs at least one of reason, host, object (all events in a namespace is too much)")
