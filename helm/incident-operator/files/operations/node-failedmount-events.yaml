@@ -1,0 +1,11 @@
+name: node-failedmount-events
+description: FailedMount events reported by this node's kubelet in any namespace (pods stuck in ContainerCreating on a volume).
+mutating: false
+params:
+  node: {from: target.name}
+run:
+  kind: k8s-events
+  reason: FailedMount
+  host: "{node}"
+  limit: 12
+budget: {maxChars: 3000}

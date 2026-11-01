@@ -1,0 +1,14 @@
+name: pod-memory-6h
+description: Memory used by each container (MiB) over the last 6 hours, and its limit (MiB), to tell an OOM kill from a steady leak.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  pod: {from: target.name}
+run:
+  kind: promql-range
+  queries:
+    used_mib: 'max by (container) (container_memory_working_set_bytes{namespace="{namespace}", pod="{pod}", container!=""}) / 1048576'
+    limit_mib: 'max by (container) (kube_pod_container_resource_limits{namespace="{namespace}", pod="{pod}", resource="memory"}) / 1048576'
+  range: 6h
+  step: 10m
+budget: {maxChars: 2000}

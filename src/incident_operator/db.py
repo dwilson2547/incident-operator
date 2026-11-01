@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS incidents (
     annotations        jsonb NOT NULL,
     generator_url      text,
     status             text NOT NULL DEFAULT 'new'
-                       CHECK (status IN ('new', 'triaging', 'analysed', 'triage_failed', 'repeat', 'skipped')),
+                       CHECK (status IN ('new', 'triaging', 'investigating', 'advising', 'analysed', 'triage_failed', 'repeat', 'skipped')),
     runbook            text,                       -- none in phase 1: every incident needs one
     starts_at          timestamptz,
     first_seen         timestamptz NOT NULL DEFAULT now(),
@@ -50,7 +50,7 @@ ALTER TABLE incidents ADD COLUMN IF NOT EXISTS problem_key text;
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS repeat_of bigint REFERENCES incidents (id);
 ALTER TABLE incidents DROP CONSTRAINT IF EXISTS incidents_status_check;
 ALTER TABLE incidents ADD CONSTRAINT incidents_status_check
-    CHECK (status IN ('new', 'triaging', 'analysed', 'triage_failed', 'repeat', 'skipped'));
+    CHECK (status IN ('new', 'triaging', 'investigating', 'advising', 'analysed', 'triage_failed', 'repeat', 'skipped'));
 CREATE INDEX IF NOT EXISTS incidents_problem_key ON incidents (problem_key, first_seen DESC);
 CREATE INDEX IF NOT EXISTS incidents_repeat_of ON incidents (repeat_of) WHERE repeat_of IS NOT NULL;
 
@@ -86,6 +86,20 @@ CREATE TABLE IF NOT EXISTS model_turns (
 );
 CREATE INDEX IF NOT EXISTS model_turns_incident ON model_turns (incident_id);
 CREATE INDEX IF NOT EXISTS model_turns_pending ON model_turns (status) WHERE status = 'submitted';
+
+-- Phase 2: runbooks (design §6). An incident that matched a runbook records its revision and the derived target;
+-- the investigation ends in findings, the remediation step in advice. Evidence rows are operation results too.
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS runbook_rev text;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS target jsonb;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS findings jsonb;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS advice jsonb;
+ALTER TABLE evidence ADD COLUMN IF NOT EXISTS trigger text NOT NULL DEFAULT 'generic';   -- generic|precursor|requested
+ALTER TABLE evidence ADD COLUMN IF NOT EXISTS operation text;
+ALTER TABLE evidence ADD COLUMN IF NOT EXISTS round int;
+ALTER TABLE evidence ADD COLUMN IF NOT EXISTS data jsonb;
+ALTER TABLE model_turns ADD COLUMN IF NOT EXISTS turn int NOT NULL DEFAULT 1;
+ALTER TABLE model_turns ADD COLUMN IF NOT EXISTS json_schema jsonb;
+ALTER TABLE model_turns ADD COLUMN IF NOT EXISTS output jsonb;               -- the parsed JSON reply
 """
 
 
@@ -184,8 +198,10 @@ def last_triaged(conn: psycopg.Connection, key: str | None, within_seconds: int,
 
 
 def triages_since(conn: psycopg.Connection, seconds: int) -> int:
-    return conn.execute("SELECT count(*) AS n FROM model_turns WHERE submitted_at > now() - make_interval(secs => %s)",
-                        (seconds,)).fetchone()["n"]
+    """Incidents whose triage started in the window (an investigation's later turns don't count again)."""
+    return conn.execute(
+        "SELECT count(*) AS n FROM model_turns WHERE turn = 1 AND session IN ('triage', 'investigation')"
+        " AND submitted_at > now() - make_interval(secs => %s)", (seconds,)).fetchone()["n"]
 
 
 def incidents_with_status(conn: psycopg.Connection, status: str, limit: int = 20) -> list[dict]:
@@ -194,21 +210,27 @@ def incidents_with_status(conn: psycopg.Connection, status: str, limit: int = 20
 
 
 def add_evidence(conn: psycopg.Connection, incident_id: int, kind: str, source: str, content: str | None,
-                 truncated: bool = False, error: str | None = None) -> None:
+                 truncated: bool = False, error: str | None = None, *, trigger: str = "generic",
+                 operation: str | None = None, round: int | None = None, data=None) -> None:
     conn.execute(
-        "INSERT INTO evidence (incident_id, kind, source, content, truncated, error) VALUES (%s, %s, %s, %s, %s, %s)",
-        (incident_id, kind, source, content, truncated, error),
+        "INSERT INTO evidence (incident_id, kind, source, content, truncated, error, trigger, operation, round, data)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (incident_id, kind, source, content, truncated, error, trigger, operation, round,
+         Jsonb(data) if data is not None else None),
     )
 
 
 def add_turn(conn: psycopg.Connection, incident_id: int, *, session: str, prompt_version: str, model: str,
-             fallback: list[str] | None, messages: list[dict], gpu_job_id) -> int:
+             fallback: list[str] | None, messages: list[dict], gpu_job_id, turn: int = 1,
+             json_schema: dict | None = None) -> int:
     return conn.execute(
         """
-        INSERT INTO model_turns (incident_id, session, prompt_version, model, fallback, messages, gpu_job_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
+        INSERT INTO model_turns (incident_id, session, prompt_version, model, fallback, messages, gpu_job_id, turn,
+                                 json_schema)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
         """,
-        (incident_id, session, prompt_version, model, fallback, Jsonb(messages), gpu_job_id),
+        (incident_id, session, prompt_version, model, fallback, Jsonb(messages), gpu_job_id, turn,
+         Jsonb(json_schema) if json_schema is not None else None),
     ).fetchone()["id"]
 
 
@@ -218,16 +240,19 @@ def pending_turns(conn: psycopg.Connection) -> list[dict]:
 
 def set_status(conn: psycopg.Connection, incident_id: int, status: str, **fields) -> None:
     cols = ", ".join(f"{k} = %s" for k in fields)
+    vals = [Jsonb(v) if isinstance(v, (dict, list)) else v for v in fields.values()]
     conn.execute(f"UPDATE incidents SET status = %s{', ' + cols if cols else ''} WHERE id = %s",
-                 (status, *fields.values(), incident_id))
+                 (status, *vals, incident_id))
 
 
 def finish_turn(conn: psycopg.Connection, turn_id: int, *, status: str, result: dict | None = None,
-                ran_model: str | None = None, worker: str | None = None, error: str | None = None) -> None:
+                ran_model: str | None = None, worker: str | None = None, error: str | None = None,
+                output: dict | None = None) -> None:
     conn.execute(
-        "UPDATE model_turns SET status = %s, result = %s, ran_model = %s, worker = %s, error = %s, finished_at = now()"
-        " WHERE id = %s",
-        (status, Jsonb(result) if result is not None else None, ran_model, worker, error, turn_id),
+        "UPDATE model_turns SET status = %s, result = %s, ran_model = %s, worker = %s, error = %s, output = %s,"
+        " finished_at = now() WHERE id = %s",
+        (status, Jsonb(result) if result is not None else None, ran_model, worker, error,
+         Jsonb(output) if output is not None else None, turn_id),
     )
 
 
@@ -274,6 +299,11 @@ def get_incident(conn: psycopg.Connection, incident_id: int) -> dict | None:
         "SELECT id, labels, first_seen, last_seen, alert_resolved_at FROM incidents WHERE repeat_of = %s"
         " ORDER BY first_seen DESC LIMIT 100", (incident_id,)).fetchall()
     return inc
+
+
+def runbook_usage(conn: psycopg.Connection) -> list[dict]:
+    return conn.execute("SELECT runbook, count(*) AS incidents, max(first_seen) AS last_matched FROM incidents"
+                        " WHERE runbook IS NOT NULL GROUP BY runbook").fetchall()
 
 
 def needs_runbook(conn: psycopg.Connection) -> list[dict]:

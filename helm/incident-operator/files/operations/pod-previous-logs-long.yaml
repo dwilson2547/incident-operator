@@ -1,0 +1,13 @@
+name: pod-previous-logs-long
+description: The last 250 log lines of the pod's previous (crashed) container, for when the short tail stops before the error.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  pod: {from: target.name}
+run:
+  kind: k8s-logs
+  namespace: "{namespace}"
+  pod: "{pod}"
+  previous: true
+  lines: 250
+budget: {maxChars: 6000}

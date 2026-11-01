@@ -1,0 +1,9 @@
+name: node-status
+description: The node's conditions (Ready, memory/disk/PID pressure), allocatable CPU and memory, and its recent events.
+mutating: false
+params:
+  node: {from: target.name}
+run:
+  kind: k8s-summary
+  object: {kind: Node, name: "{node}"}
+budget: {maxChars: 2500}

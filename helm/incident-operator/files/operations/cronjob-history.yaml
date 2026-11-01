@@ -1,0 +1,12 @@
+name: cronjob-history
+description: For the Job's CronJob - hours since its last successful run, and how many of its Jobs failed in the last 7 days (one bad night or a pattern).
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  cronjob: {from: alertLabel:cronjob}
+run:
+  kind: promql
+  queries:
+    hours_since_last_success: '(time() - kube_cronjob_status_last_successful_time{namespace="{namespace}", cronjob="{cronjob}"}) / 3600'
+    failed_jobs_7d: 'count(max_over_time((kube_job_status_failed{namespace="{namespace}"} > 0)[7d:1h]) * on(namespace, job_name) group_left kube_job_owner{namespace="{namespace}", owner_name="{cronjob}"}) or vector(0)'
+budget: {maxChars: 1200}

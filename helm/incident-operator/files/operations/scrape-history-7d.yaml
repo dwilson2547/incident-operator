@@ -1,0 +1,13 @@
+name: scrape-history-7d
+description: This ScrapeJob's runs by result over the last 7 days, and the items its recent runs found against its baseline.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  name: {from: target.name}
+run:
+  kind: promql
+  queries:
+    runs_7d: 'sum by (result) (increase(scrape_runs_total{exported_namespace="{namespace}", scrape_job="{name}"}[7d]))'
+    last_items: 'max(scrape_job_last_items{exported_namespace="{namespace}", scrape_job="{name}"})'
+    baseline_items: 'max(scrape_job_baseline_items{exported_namespace="{namespace}", scrape_job="{name}"})'
+budget: {maxChars: 1200}

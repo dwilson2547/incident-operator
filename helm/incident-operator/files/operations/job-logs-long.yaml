@@ -1,0 +1,12 @@
+name: job-logs-long
+description: The last 250 log lines of the Job's newest pod, for when the short tail stops before the error.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  job: {from: target.name}
+run:
+  kind: k8s-logs
+  namespace: "{namespace}"
+  job: "{job}"
+  lines: 250
+budget: {maxChars: 6000}

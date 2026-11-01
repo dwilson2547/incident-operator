@@ -63,7 +63,7 @@ def create_webhook_app(database_url: str) -> FastAPI:
     return app
 
 
-def create_ui_app(database_url: str) -> FastAPI:
+def create_ui_app(database_url: str, library=None) -> FastAPI:
     app = _pool_app(database_url, "incident-operator")
     page = files("incident_operator").joinpath("static/index.html").read_text()
 
@@ -81,4 +81,13 @@ def create_ui_app(database_url: str) -> FastAPI:
         if inc is None:
             raise HTTPException(404, "no such incident")
         return inc
+
+    @app.get("/api/runbooks")
+    def runbooks(c=Depends(_conn)):
+        lib = library.describe() if library else {"runbooks": [], "operations": [], "errors": []}
+        used = {r["runbook"]: r for r in db.runbook_usage(c)}
+        for r in lib["runbooks"]:
+            u = used.get(r["name"]) or {}
+            r["incidents"], r["last_matched"] = u.get("incidents", 0), u.get("last_matched")
+        return lib
     return app

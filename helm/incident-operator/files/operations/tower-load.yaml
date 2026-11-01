@@ -1,0 +1,11 @@
+name: tower-load
+description: Load per core and CPU busy on Tower (the Unraid NFS server) over the last 6 hours; high load there points at the server, not this node.
+mutating: false
+run:
+  kind: promql-range
+  queries:
+    load15_per_core: 'max(node_load15{job="tower-node"}) / count(node_cpu_seconds_total{job="tower-node", mode="idle"})'
+    cpu_busy: '1 - avg(rate(node_cpu_seconds_total{job="tower-node", mode="idle"}[10m]))'
+  range: 6h
+  step: 10m
+budget: {maxChars: 1500}

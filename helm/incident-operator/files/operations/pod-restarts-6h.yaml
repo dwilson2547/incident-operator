@@ -1,0 +1,13 @@
+name: pod-restarts-6h
+description: Restarts per container in each 10 minutes over the last 6 hours (did it start suddenly or has it been flapping).
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  pod: {from: target.name}
+run:
+  kind: promql-range
+  queries:
+    restarts: 'sum by (container) (increase(kube_pod_container_status_restarts_total{namespace="{namespace}", pod="{pod}"}[10m]))'
+  range: 6h
+  step: 10m
+budget: {maxChars: 1500}

@@ -1,0 +1,10 @@
+name: scrape-last-run
+description: The Kubernetes Job of the ScrapeJob's last run - its conditions, its newest pod's exit code and the scraper's log tail.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  job: {from: result:scrapejob-status.status.lastRun.k8sJob}
+run:
+  kind: k8s-summary
+  object: {kind: Job, namespace: "{namespace}", name: "{job}"}
+budget: {maxChars: 7000}

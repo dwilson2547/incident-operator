@@ -1,0 +1,10 @@
+name: pod-status
+description: The pod's phase, conditions, each container's state, restarts, last exit code and memory limit, its recent events, and the log tail (the crashed container's previous run too).
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  pod: {from: target.name}
+run:
+  kind: k8s-summary
+  object: {kind: Pod, namespace: "{namespace}", name: "{pod}"}
+budget: {maxChars: 7000}

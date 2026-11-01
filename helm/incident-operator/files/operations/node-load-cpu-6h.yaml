@@ -1,0 +1,13 @@
+name: node-load-cpu-6h
+description: The node's 15-minute load per CPU core and the fraction of CPU busy, over the last 6 hours (a wedge climbs steadily with idle CPU).
+mutating: false
+params:
+  instance: {from: alertLabel:instance}
+run:
+  kind: promql-range
+  queries:
+    load15_per_core: 'max(node_load15{instance="{instance}"}) / count(node_cpu_seconds_total{instance="{instance}", mode="idle"})'
+    cpu_busy: '1 - avg(rate(node_cpu_seconds_total{instance="{instance}", mode="idle"}[10m]))'
+  range: 6h
+  step: 10m
+budget: {maxChars: 1500}
