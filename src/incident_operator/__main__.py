@@ -63,7 +63,7 @@ def main() -> None:
 
     ui_port, hook_port = int(os.environ.get("UI_PORT", 8080)), int(os.environ.get("WEBHOOK_PORT", 8081))
     servers = [_Server(uvicorn.Config(create_ui_app(url, library), host="0.0.0.0", port=ui_port, log_level="warning")),
-               _Server(uvicorn.Config(create_webhook_app(url), host="0.0.0.0", port=hook_port, log_level="warning"))]
+               _Server(uvicorn.Config(create_webhook_app(url, engine), host="0.0.0.0", port=hook_port, log_level="warning"))]
 
     def stop(*_):
         engine.stopping = True

@@ -46,6 +46,11 @@ resources:
   requests: {cpu: 20m, memory: 96Mi}
   limits: {memory: 256Mi}
 
+# ServiceMonitor + the operator's own alerts. Off until the image serves /metrics (else IncidentOperatorDown fires).
+metrics:
+  enabled: false
+  labels: {release: prometheus}            # what the cluster's Prometheus selects ServiceMonitors and rules by
+
 executor:
   enabled: false               # values-prod turns it on with an image that has it (phase 3, sha-1bb76f8… or later)
 

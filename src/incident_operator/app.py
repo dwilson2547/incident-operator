@@ -1,7 +1,8 @@
 """Two HTTP apps in one process (design §13):
 
-- webhook (port 8081, Service only, never behind the ingress): `POST /alertmanager`, Alertmanager's webhook receiver.
-  Kept off the UI's port so the LAN ingress can't be used to inject alerts.
+- webhook (port 8081, Service only, never behind the ingress): `POST /alertmanager`, Alertmanager's webhook receiver,
+  and `GET /metrics` for the operator's own alerts. Kept off the UI's port so the ingress can't be used to inject
+  alerts.
 - ui (port 8080, LAN ingress): the incident list and detail page, its JSON, and approving or rejecting fixes.
 
 Sign-in (oidc.py) is on when OIDC_ISSUER is set, with OIDC_CLIENT_ID, OIDC_CLIENT_SECRET and PUBLIC_URL: then every
@@ -19,7 +20,7 @@ from importlib.resources import files
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -48,8 +49,28 @@ def _conn(request: Request):
         yield c
 
 
-def create_webhook_app(database_url: str) -> FastAPI:
+def create_webhook_app(database_url: str, engine=None) -> FastAPI:
     app = _pool_app(database_url, "incident-operator webhook")
+
+    @app.get("/metrics", response_class=PlainTextResponse)
+    def metrics(c=Depends(_conn)):
+        """Prometheus text format, read from the database on each scrape (one scrape a minute)."""
+        h = db.health(c)
+        lines = ["# TYPE incident_operator_incidents gauge"]
+        lines += [f'incident_operator_incidents{{status="{k}"}} {v}' for k, v in sorted(h["incidents"].items())]
+        lines += ["# TYPE incident_operator_fixes gauge"]
+        lines += [f'incident_operator_fixes{{status="{k}"}} {v}' for k, v in sorted(h["fixes"].items())]
+        lines += ["# HELP incident_operator_oldest_waiting_seconds Age of the oldest incident not yet triaged (0: none).",
+                  "# TYPE incident_operator_oldest_waiting_seconds gauge",
+                  f"incident_operator_oldest_waiting_seconds {float(h['oldest_waiting']):.0f}",
+                  "# HELP incident_operator_oldest_unmailed_seconds Age of the oldest answered incident not yet mailed.",
+                  "# TYPE incident_operator_oldest_unmailed_seconds gauge",
+                  f"incident_operator_oldest_unmailed_seconds {float(h['oldest_unmailed']):.0f}"]
+        if engine is not None and engine.last_pass is not None:
+            lines += ["# HELP incident_operator_last_pass_timestamp_seconds When the triage loop last completed a pass.",
+                      "# TYPE incident_operator_last_pass_timestamp_seconds gauge",
+                      f"incident_operator_last_pass_timestamp_seconds {engine.last_pass:.0f}"]
+        return "\n".join(lines) + "\n"
 
     @app.post("/alertmanager")
     async def alertmanager(request: Request, c=Depends(_conn)):

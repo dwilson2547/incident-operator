@@ -179,12 +179,15 @@ spec:
   selector: {app: incident-operator}
   ports: [{name: http, port: 80, targetPort: ui}]
 ---
-# Alertmanager's webhook target. In-cluster only: no Ingress points here, so the LAN can't inject alerts.
+# Alertmanager's webhook target, and /metrics. In-cluster only: no Ingress points here, so nobody outside can inject
+# alerts.
 apiVersion: v1
 kind: Service
 metadata:
   name: incident-operator-webhook
-  labels: {{- toYaml $labels | nindent 4 }}
+  labels:
+    {{- toYaml $labels | nindent 4 }}
+    app.kubernetes.io/component: webhook
 spec:
   selector: {app: incident-operator}
   ports: [{name: http, port: 80, targetPort: webhook}]
@@ -306,3 +309,51 @@ spec:
       volumes:
         - name: operations
           configMap: {name: incident-operator-operations}
+{{- if .Values.metrics.enabled }}
+---
+# The operator's own health (app.py /metrics on the webhook port; never the UI's, which needs sign-in).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: incident-operator
+  labels:
+    {{- toYaml $labels | nindent 4 }}
+    {{- toYaml .Values.metrics.labels | nindent 4 }}
+spec:
+  selector:
+    matchLabels: {app.kubernetes.io/part-of: incident-operator, app.kubernetes.io/component: webhook}
+  endpoints:
+    - {port: http, path: /metrics, interval: 60s}
+---
+# Alerts for when triage itself stops. Routed to email only (cluster-config cluster-alerts.yaml), never back to this
+# operator's webhook: a stuck operator can't triage its own outage.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: incident-operator
+  labels:
+    {{- toYaml $labels | nindent 4 }}
+    {{- toYaml .Values.metrics.labels | nindent 4 }}
+spec:
+  groups:
+    - name: incident-operator
+      rules:
+        - alert: IncidentOperatorDown
+          expr: absent(incident_operator_last_pass_timestamp_seconds) or (time() - incident_operator_last_pass_timestamp_seconds) > 300
+          for: 10m
+          labels: {severity: critical}
+          annotations:
+            summary: incident-operator's triage loop hasn't completed a pass in 15+ minutes; alerts aren't being triaged and approved fixes aren't checked.
+        - alert: IncidentOperatorTriageStalled
+          expr: incident_operator_oldest_waiting_seconds > 3600
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: "An incident has waited {{ "{{" }} $value | humanizeDuration {{ "}}" }} for triage: gpu-scheduler unreachable or failing, or the hourly cap is holding back a storm."
+        - alert: IncidentOperatorEmailFailing
+          expr: incident_operator_oldest_unmailed_seconds > 1800
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: incident-operator has answered incidents it hasn't been able to mail for 30+ minutes (check its log for SMTP errors).
+{{- end }}

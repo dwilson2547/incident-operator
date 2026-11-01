@@ -247,3 +247,24 @@ def test_migrates_a_phase_1_database(conn):
     db.migrate(conn)
     db.migrate(conn)                                                               # and again: idempotent
     conn.execute("UPDATE incidents SET status = 'repeat'")
+
+
+@needs_pg
+def test_metrics_for_the_operators_own_alerts(conn):
+    from types import SimpleNamespace
+    from fastapi.testclient import TestClient
+    from incident_operator.app import create_webhook_app
+    db.record_firing(conn, alert("a"))
+    conn.execute("UPDATE incidents SET first_seen = now() - interval '2 hours'")
+    i, _ = db.record_firing(conn, alert("b"))
+    db.set_status(conn, i, "analysed")
+    engine = SimpleNamespace(last_pass=None)
+    with TestClient(create_webhook_app(conn.info.dsn, engine)) as c:
+        text = c.get("/metrics").text
+        assert 'incident_operator_incidents{status="new"} 1' in text and 'incident_operator_incidents{status="analysed"} 1' in text
+        waiting = float(next(line.split()[1] for line in text.splitlines()
+                             if line.startswith("incident_operator_oldest_waiting_seconds ")))
+        assert 7100 < waiting < 7300                                        # the new one, 2 h old
+        assert "last_pass" not in text                                     # no pass yet: absent() is what fires
+        engine.last_pass = 1793550000.4
+        assert "incident_operator_last_pass_timestamp_seconds 1793550000" in c.get("/metrics").text

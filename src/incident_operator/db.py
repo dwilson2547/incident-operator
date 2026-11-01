@@ -406,6 +406,26 @@ def operation_records(conn: psycopg.Connection) -> list[dict]:
         """).fetchall()
 
 
+# -- health (/metrics) -----------------------------------------------------------------------------------------------
+
+def health(conn: psycopg.Connection) -> dict:
+    """What the operator's own alerts watch: incidents by status, the oldest one still waiting for triage, the oldest
+    answer not yet mailed, and fixes by status."""
+    out = {"incidents": {r["status"]: r["n"] for r in conn.execute(
+        "SELECT status, count(*) AS n FROM incidents GROUP BY status").fetchall()},
+           "fixes": {r["status"]: r["n"] for r in conn.execute(
+        "SELECT status, count(*) AS n FROM op_runs GROUP BY status").fetchall()}}
+    out |= conn.execute(
+        """
+        SELECT coalesce(extract(epoch FROM now() - min(first_seen) FILTER (
+                   WHERE status IN ('new', 'triaging', 'investigating', 'advising'))), 0) AS oldest_waiting,
+               coalesce(extract(epoch FROM now() - min(first_seen) FILTER (
+                   WHERE status IN ('analysed', 'triage_failed') AND notified_at IS NULL)), 0) AS oldest_unmailed
+        FROM incidents
+        """).fetchone()
+    return out
+
+
 # -- library ---------------------------------------------------------------------------------------------------------
 
 class LastGood:

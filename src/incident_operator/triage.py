@@ -126,6 +126,7 @@ class Engine:
         self.conn, self.cfg, self.k8s, self.gpu, self.notifier = conn, cfg, k8s, gpu, notifier
         self.library, self.runner = library, runner or Runner(k8s)
         self.stopping = False
+        self.last_pass: float | None = None      # time of the last pass that completed, for /metrics
 
     def step(self) -> int:
         """One pass of each stage. Returns how many things moved."""
@@ -337,7 +338,9 @@ class Engine:
     def run_forever(self, interval: float = 5.0) -> None:
         while not self.stopping:
             try:
-                if self.step() == 0:
+                moved = self.step()
+                self.last_pass = time.time()
+                if moved == 0:
                     time.sleep(interval)
             except Exception:
                 log.exception("triage pass failed")

@@ -49,6 +49,11 @@ Without it the page is open on the LAN and fixes can't be approved (`ALLOW_ANONY
 `ui.tlsSecretName` publishes the page (`ui.host` a `*.danwils.com` name; DNS, certificate and edge limits follow from
 the Ingress, cluster-config "Public vs internal ingress"); the chart refuses that without `ui.oidc.issuer`.
 
+**Its own health:** `/metrics` on the webhook port (in-cluster only) and three alerts in the chart, mailed directly,
+never sent back to this webhook: `IncidentOperatorDown` (the triage loop hasn't completed a pass in 15 min),
+`IncidentOperatorTriageStalled` (an incident has waited over an hour, e.g. gpu-scheduler down), and
+`IncidentOperatorEmailFailing`. On with `metrics.enabled`.
+
 ## Runbooks (phase 2a)
 
 An alert that matches a runbook (`helm/incident-operator/files/runbooks/*.md`) gets a two-session triage instead of
