@@ -1,10 +1,12 @@
 name: scrape-stack-health
-description: Available replicas of the shared scraper services (webcache, browserless, the VPN proxy) and how many other ScrapeJobs are failing right now (one site, or everything).
+description: Available replicas of webcache, browserless and the VPN proxy, every prod ScrapeJob failing right now with its scraper, and a count per scraper.
 mutating: false
 run:
   kind: promql
   queries:
     available_replicas: 'max by (namespace, deployment) (kube_deployment_status_replicas_available{namespace=~"scrape-stack|vpn"})'
     scrapejobs_failing: 'count(scrape_job_consecutive_failures > 0) or vector(0)'
+    failing_per_scraper: 'count by (scraper) (scrape_job_consecutive_failures{exported_namespace!~".*-dev"} > 0)'
+    failing_jobs: 'max by (exported_namespace, scrape_job, scraper) (scrape_job_consecutive_failures{exported_namespace!~".*-dev"}) > 0'
     scrapejobs_suspended: 'count(scrape_job_phase{phase="Suspended"} == 1) or vector(0)'
 budget: {maxChars: 2000}

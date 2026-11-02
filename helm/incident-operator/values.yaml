@@ -20,7 +20,7 @@ triage:
   fallbackAfterSeconds: 60
   deadlineSeconds: 900
   maxNewTokens: 1024
-  investigateMaxNewTokens: 768            # per JSON turn of a runbook investigation
+  investigateMaxNewTokens: 1536           # per JSON turn of a runbook investigation
   # Brakes against a noisy alert (README: Repeats and the hourly cap).
   repeatWindowSeconds: 21600              # same problem triaged within 6 h -> marked a repeat, not triaged or mailed
   maxPerHour: 12                          # triage calls per hour; the rest wait

@@ -157,7 +157,7 @@ answers found the right container, exit code and log line.
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_TO`, `PUBLIC_URL` | email; off unless host, from and to are set |
 | `UI_PORT`, `WEBHOOK_PORT` | 8080, 8081 |
 | `RUNBOOKS_DIR`, `OPERATIONS_DIR`, `PROMETHEUS_URL` | the mounted ConfigMaps; Prometheus for `promql` operations |
-| `TRIAGE_INVESTIGATE_MAX_NEW_TOKENS` | 768, per investigation/remediation turn |
+| `TRIAGE_INVESTIGATE_MAX_NEW_TOKENS` | 1536, per investigation/remediation turn |
 | `KUBE_API_URL` | local runs: e.g. `kubectl proxy` at `http://127.0.0.1:8001`; in the cluster the service account is used |
 | `EVIDENCE=off` | skip the Kubernetes reads |
 | `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | authentik sign-in for the page; `PUBLIC_URL` is the callback's base |

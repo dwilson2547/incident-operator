@@ -52,7 +52,7 @@ class Config:
     fallback_max_prompt_tokens: int = 12000
     deadline_seconds: int = 900
     max_new_tokens: int = 1024
-    investigate_max_new_tokens: int = 768      # one JSON reply per turn
+    investigate_max_new_tokens: int = 1536     # one JSON reply per turn (768 cut long 'why's mid-JSON)
     primer_path: str = "/etc/incident-operator/primer.md"
     repeat_window_seconds: int = 6 * 3600      # same problem key triaged this recently -> `repeat`, no new report
     max_per_hour: int = 12                     # triage submissions; the rest wait
