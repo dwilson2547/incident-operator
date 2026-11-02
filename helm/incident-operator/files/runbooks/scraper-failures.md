@@ -1,10 +1,10 @@
 ---
 name: scraper-failures
 description: >-
-  A ScrapeJob is stale (no successful run in twice its period) or was auto-suspended after repeated failed runs.
-  Find whether the site, the scraper or the shared services broke.
+  A ScrapeJob's run failed after its retries (Failing), it is stale (no successful run in twice its period), or it
+  was auto-suspended after repeated failed runs. Find whether the site, the scraper or the shared services broke.
 match:
-  alertname: [ScrapeJobStale, ScrapeJobSuspended]
+  alertname: [ScrapeJobFailing, ScrapeJobStale, ScrapeJobSuspended]
 priority: 10
 target: {kind: ScrapeJob, name: scrape_job, namespace: exported_namespace}
 precursors: [scrapejob-status, scrape-last-run]
@@ -13,7 +13,8 @@ operations: [scrape-history-7d, scrape-stack-health]
 
 ## What this looks like
 scrape-job-manager runs each ScrapeJob as Kubernetes Jobs, retries transient failures, and suspends a ScrapeJob
-after repeated failed runs. Stale means no success for twice its period; Suspended means it stopped trying.
+after repeated failed runs. Failing means its latest run ended Failed (transient errors are retried first) and
+it will run again on its schedule; Stale means no success for twice its period; Suspended means it stopped trying.
 
 ## Investigation
 - scrapejob-status: lastRun (result, exitCode, error, attempts, items), consecutiveFailures, lastSuccess (null:
@@ -30,6 +31,9 @@ after repeated failed runs. Stale means no success for twice its period; Suspend
   suspended), not that they all failed.
 
 ## Remediation
+- ScrapeJobFailing is one failed run, not an outage: the ScrapeJob is still scheduled and tries again next period.
+  Say what broke in this run and whether the next run is likely to fail the same way (Broken 65, out of memory)
+  or not (a one-off transient). Don't tell anyone to resume it: it isn't suspended.
 - ScrapeJobSuspended means retrying has STOPPED, whatever the exit code: it will not run again until someone
   resumes it. Never say it fixes itself. Say what to fix first, then to resume it with
   `kubectl -n <namespace> annotate scrapejob <name> scrape.danwils.com/resume=$(date +%s) --overwrite`

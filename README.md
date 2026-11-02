@@ -71,7 +71,7 @@ the generic one below (design §6):
 | `pod-crashloop` | `KubePodCrashLooping` | the pod |
 | `backup-job-failed` | `PostgresBackupJobFailed`, `OffsiteBackupJobFailed`, `SecretsBackupJobFailed` | the Job |
 | `nfs-client-wedge` | `NodeLoadHighCPUIdle` (new, cluster-config) | the node |
-| `scraper-failures` | `ScrapeJobStale`, `ScrapeJobSuspended` | the ScrapeJob |
+| `scraper-failures` | `ScrapeJobFailing`, `ScrapeJobStale`, `ScrapeJobSuspended` | the ScrapeJob |
 
 Operation kinds: `k8s-summary` (pod/Job/workload/node status, events, logs), `k8s-get` (fields of any object, e.g. a
 ScrapeJob), `k8s-events` (by reason, node or object), `k8s-logs`, `promql`, `promql-range` (downsampled),

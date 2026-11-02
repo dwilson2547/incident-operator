@@ -35,6 +35,8 @@ def test_shipped_files_load_cleanly():
     lib = load(CHART)
     assert lib.errors == {}
     assert set(lib.runbooks) == {"pod-crashloop", "backup-job-failed", "nfs-client-wedge", "scraper-failures"}
+    for alert in ("ScrapeJobFailing", "ScrapeJobStale", "ScrapeJobSuspended"):
+        assert lib.match({"alertname": alert, "scrape_job": "s", "exported_namespace": "g"}).name == "scraper-failures"
 
 
 def test_matching_and_priority(lib_dirs):
