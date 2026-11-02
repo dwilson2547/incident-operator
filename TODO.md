@@ -2,6 +2,14 @@
 
 ## Next
 
+- [ ] **Shrink scraper logs before the model sees them** (idea 2026-11-02, from the Qwen3.8 27B replay).
+  Scraper logs are mostly repeated progress/retry lines with the cause at the bottom; #24's prompt was ~8.7k tokens
+  and the 27B spent ~4 of its ~5 min on the first call just reading it (~37 tok/s prompt on the Mac). Code first, in
+  the evidence step: collapse repeated lines ("×412 retrying page …"), always keep a traceback and the last N lines
+  whole, keep lines matching error/blocked/exit with a little context. A small-model extraction pass only for what
+  code can't trim. Helps every model (shorter prompts for the 9B and Gemma too). Measurements:
+  `ai/gpu-scheduler/docs/remote-worker-mac.md` "Big-model replay".
+
 - [ ] **TowerContainerCPUSustained needs alert work and a runbook** (flagged 2026-11-02, incident #28).
   It fires for `plex` about once a day, and by the time anyone looks there's nothing to see.
   Measured 2026-10-27 → 11-02 (Prometheus `ALERTS` + `container_cpu_usage_seconds_total{job="tower-cadvisor"}`):
