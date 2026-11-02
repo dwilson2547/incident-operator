@@ -162,6 +162,7 @@ function renderList(d) {
 
 function renderIncident(i) {
   const ann = i.annotations || {};
+  const turn = i.turns[i.turns.length - 1];   // the generic (no-runbook) answer shows its fallback model
   // The page refreshes every 10 s: keep open/closed sections as the user left them (same incident only).
   const view = $("#view-incident"), keep = view.dataset.id === String(i.id);
   const was = keep ? [...view.querySelectorAll("details")].map(d => d.open) : null;
