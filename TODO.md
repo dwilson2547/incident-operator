@@ -16,9 +16,8 @@
   - Triage had no evidence (`target: null`; Tower isn't a cluster object), so the model just restated the alert.
 
   Work:
-  1. Alert (cluster-config `monitoring/manifests/tower-monitoring.yaml`): decide what it's for (miner detection)
-     and exclude or explain a known Plex maintenance window instead of paging on it. Compare with
-     `TowerCPUElevated`. Reconsider `critical`.
+  1. ~~Alert~~ done 2026-11-02 (cluster-config 8234bf9): plex is skipped 06:00–12:00 UTC (`unless on(name)`), and
+     the summary no longer says "for hours". Replayed over 10-26..11-02 it returns nothing. Still `critical`.
   2. Runbook `tower-container-cpu`: a Prometheus op giving the container's CPU over the last 6–24h with the start
      time, the shape (flat or bursty) and same-time-yesterday, so the model can say "daily scheduled-task shape"
      vs "new and steady". A read-only `docker top` from Tower would need an SSH probe (none exists; out of scope
