@@ -85,24 +85,39 @@ say the reply hit the token cap.
 
 ## Fix
 
-_TBD_ — not applied yet. Proposed:
+### `investigate.py` — `FINDINGS`: bound `evidence_refs`
 
-### `investigate.py` — bound `evidence_refs`
+`"maxItems": 8`. #60's exact prompt now finishes in 440 tokens on the deployed schema. A loop inside a free-text string
+is still possible; the retry below is what handles that.
 
-Add `"maxItems": 8` to `FINDINGS`. Tested on the failing prompt. A loop inside a free-text string would still be possible.
+### `triage.py` — `Engine._runbook_turn_done`: a reply at the cap gets one retry
 
-### `triage.py` — treat a cut-off reply as its own case
+If the reply doesn't parse and `output_tokens` reached `investigate_max_new_tokens`, the same turn is submitted once
+more, with a note appended (`investigate.retry_messages`). The note is needed because the identical prompt at
+temperature 0 loops identically: with the note, #60's prompt on the old unbounded schema finished in 344 tokens. A
+second reply at the cap fails with "hit the 1536-token limit again on retry"; other unparseable replies keep the
+"wasn't the JSON" error. Retries share a turn number, so the page and email count distinct turns.
 
-When `output_tokens` reaches the cap and the reply doesn't parse, retry once on the fallback model or with a changed
-prompt, since the same prompt at temperature 0 loops again. Say "hit the token cap" in the error.
+### `evidence.py` — `collapse_repeats`: adjacent identical log lines become `(n) line`
 
-### Evidence step — dedupe log lines
+Applied before the character cap in `evidence._logs` and `ops.Runner._logs`, so the budget reaches further back. The
+primer explains `(n)`. This shrinks prompts; it isn't the fix for this failure. Stored evidence holds the collapsed
+text, not the raw lines.
 
-Collapse adjacent identical lines to `(n) line`, before the character cap so the budget reaches further back. This is
-worthwhile for prompt size and speed (see `TODO.md`), but it isn't the fix for this failure.
+Replayed the first turn of seven stored scraper incidents (24, 25, 27, 42, 59, 60, 63) raw and collapsed, with the
+bounded schema: all 14 finished at high confidence with the same cause, and input fell from 7,483–9,053 tokens to
+3,480–4,697. Those stored logs had already been capped, so this measures the same text made shorter, not the extra
+history a real run can now reach.
 
 ---
 
 ## Files changed
 
-_TBD_ — none yet.
+- `src/incident_operator/investigate.py` — `FINDINGS`, `retry_messages`, `PROMPT_VERSION`
+- `src/incident_operator/triage.py` — `Engine._runbook_turn_done`
+- `src/incident_operator/notify.py` — `compose` (turn count)
+- `src/incident_operator/static/index.html` — turn count
+- `src/incident_operator/evidence.py` — `collapse_repeats`, `_logs`
+- `src/incident_operator/ops.py` — `Runner._logs`
+- `helm/incident-operator/files/primer.md` — what `(n)` means
+- `tests/test_runbooks.py`, `tests/test_evidence.py`

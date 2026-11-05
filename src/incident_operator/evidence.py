@@ -10,6 +10,7 @@ pods/log, events, jobs, workloads and nodes). Nothing here can change anything.
 """
 from __future__ import annotations
 
+import itertools
 import logging
 import os
 from dataclasses import dataclass
@@ -109,6 +110,16 @@ def collect(k8s: K8s, labels: dict[str, str]) -> list[Item]:
 
 # -- collectors ------------------------------------------------------------------------------------------------------
 
+def collapse_repeats(text: str) -> str:
+    """Adjacent identical log lines become one, prefixed `(n) ` (the primer tells the model what that means). Scraper
+    logs are mostly such runs. Nothing but exact repeats goes, so a unique line is never lost."""
+    out: list[str] = []
+    for line, run in itertools.groupby(text.split("\n")):
+        n = sum(1 for _ in run)
+        out.append(f"({n}) {line}" if n > 1 and line.strip() else line)
+    return "\n".join(out)
+
+
 def _cap(text: str, limit: int = ITEM_CHARS, tail: bool = False) -> tuple[str, bool]:
     if len(text) <= limit:
         return text, False
@@ -174,7 +185,7 @@ def _logs(k8s: K8s, ns: str, pod: str, container: str, previous: bool, limit: in
                        {"container": container, "tailLines": LOG_LINES, "previous": str(previous).lower()}, text=True)
     except Exception as e:
         return Item("logs", source, None, error=f"{type(e).__name__}: {e}"[:300])
-    text, cut = _cap(text.strip() or "(empty)", limit, tail=True)
+    text, cut = _cap(collapse_repeats(text.strip()) or "(empty)", limit, tail=True)
     return Item("logs", source, text, cut)
 
 

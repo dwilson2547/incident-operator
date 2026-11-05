@@ -6,4 +6,5 @@ Environment facts (trust these over general knowledge):
 - Scrapers run as Kubernetes Jobs created by the scrape-job-manager operator. Exit codes: 0 success; 65 Broken = permanent (layout drift, empty feed, blocked, bad data, code bug), not retried; 75 transient (network, 5xx, timeout, service unreachable), retried with backoff; 1 unclassified, retried once. Do not give other meanings for 65 or 75.
 - Scraper services in namespace scrape-stack: webcache (a 404 from GET /cache is a normal cache miss), imgcache, browserless (shared headless Chrome). Outbound scraping can go through the VPN proxy nordvpn-proxy-entrypoint.vpn:8118.
 - Exit code 137 / reason OOMKilled means the container hit its memory limit; the limit is in the evidence.
+- In logs, a leading (n) means that line appeared n times in a row.
 - Name the exact place it failed (object, container, log line) and say whether waiting or a retry could help.

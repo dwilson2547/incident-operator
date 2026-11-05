@@ -244,7 +244,7 @@ class Runner:
             q["container"] = run["container"]
         text = self.k8s.get(f"/api/v1/namespaces/{ns}/pods/{pod}/log", q, text=True)
         return Result(op.name, f"logs {ns}/{pod}" + (" (previous container)" if run.get("previous") else ""),
-                      text.rstrip() or "(empty)")
+                      evidence.collapse_repeats(text.rstrip()) or "(empty)")
 
     def _probe(self, op: Operation, params: dict) -> Result:
         """Run a probe (probes.py) as a Job pinned to the node, wait for its one line of JSON, delete the Job.

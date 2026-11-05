@@ -2,12 +2,11 @@
 
 ## Next
 
-- [ ] **Shrink scraper logs before the model sees them** (idea 2026-11-02, from the Qwen3.8 27B replay).
-  Scraper logs are mostly repeated progress/retry lines with the cause at the bottom; #24's prompt was ~8.7k tokens
-  and the 27B spent ~4 of its ~5 min on the first call just reading it (~37 tok/s prompt on the Mac). Code first, in
-  the evidence step: collapse repeated lines ("×412 retrying page …"), always keep a traceback and the last N lines
-  whole, keep lines matching error/blocked/exit with a little context. A small-model extraction pass only for what
-  code can't trim. Helps every model (shorter prompts for the 9B and Gemma too). Measurements:
+- [ ] **Shrink scraper logs further, if prompts still hurt** (idea 2026-11-02, from the Qwen3.8 27B replay).
+  Adjacent repeats collapse to `(n) line` since 2026-11-05, which halved the scraper prompts replayed (~8.7k to ~4.3k
+  tokens). Not done: collapsing lines that differ only by a counter or URL, keeping error lines with context while
+  trimming the rest, a small-model extraction pass. `LOG_LINES` is still 300, so collapsing frees budget that isn't
+  used yet; raising it would reach further back and give some of the savings back. Earlier measurements:
   `ai/gpu-scheduler/docs/remote-worker-mac.md` "Big-model replay".
 
 - [ ] **TowerContainerCPUSustained needs alert work and a runbook** (flagged 2026-11-02, incident #28).

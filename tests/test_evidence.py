@@ -120,3 +120,17 @@ def test_whole_set_stays_within_the_budget():
 def test_nothing_to_collect():
     assert collect(FakeK8s({}), {"alertname": "Watchdog"}) == []
     assert "no evidence" in render([])
+
+
+def test_collapse_repeats_counts_runs_and_keeps_every_unique_line():
+    log = "a\na\na\nb\na\n\n\n  indented\n  indented\nTraceback: boom"
+    assert evidence.collapse_repeats(log) == "(3) a\nb\na\n\n(2)   indented\nTraceback: boom"
+    assert evidence.collapse_repeats("one line") == "one line"
+    assert evidence.collapse_repeats("") == ""
+
+
+def test_logs_are_collapsed_before_the_character_cap():
+    head = "the cause, far back"
+    k = FakeK8s({"/api/v1/namespaces/n/pods/p/log?previous=false": head + "\n" + "progress\n" * 5000})
+    item = evidence._logs(k, "n", "p", "c", previous=False, limit=100)
+    assert item.content == head + "\n(5000) progress" and not item.truncated
