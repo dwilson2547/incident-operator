@@ -1,5 +1,5 @@
 #!/bin/bash
-# One-time: let Argo CD read this private repo, the way it reads gpu-scheduler: a read-only SSH deploy key, public
+# One-time: let Argo CD read this repo over SSH, the way it reads gpu-scheduler: a read-only SSH deploy key, public
 # half on GitHub, private half in Argo's repository Secret repo-incident-operator. The key pair lives in a temp dir
 # for the length of this script and is deleted after.
 #   bash infra/incident-operator/scripts/setup-argo-access.sh

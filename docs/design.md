@@ -210,7 +210,7 @@ Why not a git-sync sidecar:
   operation and the permissions it needs arrive in the same sync. With git-sync, a new operation would go live on
   push while its RBAC waited for Argo, and it would fail with 403 in between. Runbooks go the same way so they
   never refer to an operation that isn't deployed yet.
-- No deploy key for the private repo inside the cluster, and no extra sidecar to keep healthy.
+- No git access from inside the operator, and no extra sidecar to keep healthy.
 - The runbook revision recorded on an incident (§8.2) is the commit Argo deployed.
 
 The fast loop is local: the replay CLI (§9.5) runs stored incidents against the working-tree files, so prose and
@@ -648,12 +648,12 @@ After several approved runs where the post-check passed, raising it to `auto` is
 
 ## 13. Placement and deployment
 
-- **Project:** `infra/incident-operator`, a private repo (dwilson2547/incident-operator) and workspace submodule.
+- **Project:** `infra/incident-operator`, a public repo (dwilson2547/incident-operator) and workspace submodule.
   Domain `infra`, by purpose: operating the cluster. Secondary domain `ai`.
 - **Chart:** `helm/incident-operator/` in this repo (self-deploying, CONVENTIONS §6). Controller, executor and UI as
   three Deployments from one image. The executor's RBAC is generated from `operations/` (§7.2).
 - **Runbooks and operations:** `helm/incident-operator/files/{runbooks,operations}/`, rendered into ConfigMaps
-  (§4.3). The repo is private, so node names and cluster specifics can stay here.
+  (§4.3). They describe this cluster, so node names and cluster specifics stay in them; the repo is public, by choice.
 - **Alertmanager:** add a `webhook_configs` receiver to the `cluster-alerts` root config
   (`monitoring/manifests/cluster-alerts.yaml`) with `continue: true` next to email, so email is never affected.
 - **DB:** `incident_operator` on the plain `postgres` instance, with an init SQL in `infra/cluster-config/postgres/`
