@@ -174,7 +174,7 @@ function renderIncident(i) {
         <h2>${esc(i.alertname)} <span class="tag s-${esc(i.status)}" style="text-transform:none">${esc(STATUS[i.status] || i.status)}</span></h2>
         <div class="card">
           ${i.status === "analysed" && i.findings ? findingsHtml(i)
-              + `<p class="muted" style="margin:12px 0 0;font-size:12.5px">Answered by <b>${esc(i.analysis_model)}</b> on ${esc(i.analysis_worker || "?")} after ${i.turns.filter(t => t.session === "investigation").length} investigation turn(s)${i.fixes.some(f => f.started_at) ? "" : " · nothing was changed"}</p>`
+              + `<p class="muted" style="margin:12px 0 0;font-size:12.5px">Answered by <b>${esc(i.analysis_model)}</b> on ${esc(i.analysis_worker || "?")} after ${new Set(i.turns.filter(t => t.session === "investigation").map(t => t.turn)).size} investigation turn(s)${i.fixes.some(f => f.started_at) ? "" : " · nothing was changed"}</p>`
             : i.status === "analysed" ? `<div class="answer">${esc(i.analysis)}</div>
               <p class="muted" style="margin:12px 0 0;font-size:12.5px">Answered by <b>${esc(i.analysis_model)}</b> on ${esc(i.analysis_worker || "?")}${turn && turn.ran_model && turn.ran_model !== turn.model ? ` (fallback from ${esc(turn.model)})` : ""} · suggestion only, nothing was changed</p>`
             : i.status === "triage_failed" ? `<div class="err">The model couldn't analyse this: ${esc(i.error || "unknown error")}</div>`

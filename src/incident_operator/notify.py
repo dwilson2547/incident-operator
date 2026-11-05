@@ -61,7 +61,7 @@ def compose(inc: dict, cfg: SmtpConfig) -> EmailMessage:
         lines.append(ann["summary"])
     lines.append("")
     if ok:
-        turns = sum(1 for x in inc.get("turns") or [] if x.get("session") == "investigation")
+        turns = len({x.get("turn") for x in inc.get("turns") or [] if x.get("session") == "investigation"})
         lines += [inc.get("analysis") or "(empty answer)", "",
                   f"Answered by {inc.get('analysis_model') or '?'} on {inc.get('analysis_worker') or '?'}"
                   + (f" after {turns} investigation turn{'s' if turns != 1 else ''}" if turns else "")

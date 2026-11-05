@@ -156,6 +156,9 @@ def test_investigation_schema_only_allows_done_on_the_last_round():
 
 # -- the loop, end to end ---------------------------------------------------------------------------------------------
 
+CUT_OFF = object()                 # a reply that ran into max_new_tokens: unfinished JSON
+
+
 class ScriptedGpu:
     """Answers each submitted job with the next scripted JSON reply."""
 
@@ -167,8 +170,9 @@ class ScriptedGpu:
             raise ConnectionError("down")
         jid = str(uuid.uuid4())
         reply = self.replies.pop(0)
-        self.jobs[jid] = {"status": "done", "ran_model": "qwen35-9b", "worker": "ainode",
-                          "result": {"text": json.dumps(reply), "json": reply}}
+        result = ({"text": '{"action":"done","reason":"again and again', "json": None, "output_tokens": 1536}
+                  if reply is CUT_OFF else {"text": json.dumps(reply), "json": reply, "output_tokens": 300})
+        self.jobs[jid] = {"status": "done", "ran_model": "qwen35-9b", "worker": "ainode", "result": result}
         self.submitted.append((messages, json_schema))
         return jid
 
@@ -277,6 +281,69 @@ def test_reply_that_isnt_json_fails_the_incident(conn, tmp_path):
     e.step(); e.step()
     inc = db.get_incident(conn, inc_id)
     assert inc["status"] == "triage_failed" and "wasn't the JSON" in inc["error"]
+
+
+DONE = {"action": "done", "requests": [], "reason": "enough", "findings": FINDINGS}
+
+
+def test_evidence_refs_are_bounded():
+    s = investigate.investigation_schema(["a"], final=False)
+    assert s["properties"]["findings"]["properties"]["evidence_refs"]["maxItems"] == 8
+
+
+@needs_pg
+def test_cut_off_investigation_reply_is_retried_with_a_changed_prompt(conn, tmp_path):
+    gpu = ScriptedGpu([CUT_OFF, DONE, ADVICE])
+    e = engine(conn, gpu, tmp_path)
+    inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    for _ in range(4):
+        e.step()
+    inc = db.get_incident(conn, inc_id)
+    assert inc["status"] == "analysed"
+    assert [(t["session"], t["turn"]) for t in inc["turns"]] == [("investigation", 1), ("investigation", 1),
+                                                                 ("remediation", 2)]
+    (first, schema1), (second, schema2) = gpu.submitted[:2]
+    assert first != second and "token limit" in second[-1]["content"] and "token limit" not in first[-1]["content"]
+    assert second[-1]["content"].startswith(first[-1]["content"]) and schema1 == schema2
+
+
+@needs_pg
+def test_cut_off_remediation_reply_is_retried(conn, tmp_path):
+    gpu = ScriptedGpu([DONE, CUT_OFF, ADVICE])
+    e = engine(conn, gpu, tmp_path)
+    inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    for _ in range(4):
+        e.step()
+    inc = db.get_incident(conn, inc_id)
+    assert inc["status"] == "analysed" and [t["session"] for t in inc["turns"]] == ["investigation", "remediation",
+                                                                                    "remediation"]
+
+
+@needs_pg
+def test_second_cut_off_reply_fails_and_says_why(conn, tmp_path):
+    gpu = ScriptedGpu([CUT_OFF, CUT_OFF])
+    e = engine(conn, gpu, tmp_path)
+    inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    for _ in range(4):
+        e.step()
+    inc = db.get_incident(conn, inc_id)
+    assert inc["status"] == "triage_failed" and "1536-token limit" in inc["error"] and len(gpu.submitted) == 2
+
+
+@needs_pg
+def test_retry_waits_for_an_unreachable_gpu_scheduler(conn, tmp_path):
+    gpu = ScriptedGpu([CUT_OFF, DONE, ADVICE])
+    e = engine(conn, gpu, tmp_path)
+    inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    e.start_new()
+    gpu.down = True
+    assert e.poll() == 0
+    inc = db.get_incident(conn, inc_id)
+    assert inc["status"] == "investigating" and [t["status"] for t in inc["turns"]] == ["submitted"]
+    gpu.down = False
+    for _ in range(3):
+        e.step()
+    assert db.get_incident(conn, inc_id)["status"] == "analysed"
 
 
 @needs_pg

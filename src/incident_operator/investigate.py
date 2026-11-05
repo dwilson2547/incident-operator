@@ -18,7 +18,7 @@ import json
 from .library import Runbook
 from .ops import Result
 
-PROMPT_VERSION = "runbook-v3"
+PROMPT_VERSION = "runbook-v4"
 MAX_ROUNDS = 3
 # Generous on purpose (2026-11-01: a cut log tail hid the first attempt's cause and that its snapshot was saved). The
 # last turn carries all of it: ~48k + 2 x 32k characters is ~35k tokens with the runbook, inside the 9B's 64k context.
@@ -60,7 +60,9 @@ FINDINGS = {
     "properties": {
         "what_failed": {"type": "string"},
         "where": {"type": "string"},
-        "evidence_refs": {"type": "array", "items": {"type": "string"}},
+        # Bounded: unbounded, the 9B once repeated variations of a string here until the output cap (docs/issues/
+        # 2026_11_05_evidence_refs_repetition_loop.md). Normal replies have at most 5.
+        "evidence_refs": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
         "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
         "matches_runbook": {"type": "boolean"},
         "summary": {"type": "string"},
@@ -159,6 +161,15 @@ def next_messages(messages: list[dict], reply_text: str, results: list[Result], 
     parts.append("This is your last turn: finish now with findings." if rounds_left <= 0
                  else f"{rounds_left} more round{'s' if rounds_left > 1 else ''} of requests at most.")
     return messages + [{"role": "assistant", "content": reply_text}, {"role": "user", "content": "\n\n".join(parts)}]
+
+
+def retry_messages(messages: list[dict]) -> list[dict]:
+    """The same turn again after a reply that hit the token limit. The note matters as well as what it says: at
+    temperature 0 the identical prompt gives the identical runaway reply."""
+    last = messages[-1]
+    note = ("\n\nYour previous reply to this ran past the token limit, repeating itself, and was thrown away. "
+            "Answer again and keep every field short.")
+    return messages[:-1] + [{**last, "content": last["content"] + note}]
 
 
 def fixes_text(runbook: Runbook, library_ops: dict) -> tuple[list[str], str]:

@@ -261,9 +261,26 @@ class Engine:
         done = dict(status="done", result=res, ran_model=job.get("ran_model"), worker=job.get("worker"), output=output)
         inc = db.get_incident(self.conn, turn["incident_id"])
         if not isinstance(output, dict):
+            limit = self.cfg.investigate_max_new_tokens
+            cut_off = (res.get("output_tokens") or 0) >= limit
+            if cut_off and sum(t["session"] == turn["session"] and t["turn"] == turn["turn"] for t in inc["turns"]) < 2:
+                messages = investigate.retry_messages(turn["messages"])
+                try:
+                    job_id = self.gpu.submit(messages, turn["json_schema"], limit)
+                except Exception as e:                # stays unprocessed: the next pass tries again
+                    log.warning("retry of turn %d for incident %s failed: %s", turn["turn"], inc["id"], e)
+                    return 0
+                db.finish_turn(self.conn, turn["id"], **done)
+                db.add_turn(self.conn, inc["id"], session=turn["session"], prompt_version=turn["prompt_version"],
+                            model=self.cfg.model, fallback=self._fallback(messages), messages=messages,
+                            gpu_job_id=job_id, turn=turn["turn"], json_schema=turn["json_schema"])
+                log.info("incident %s: %s turn %d hit the %d-token limit, retrying", inc["id"], turn["session"],
+                         turn["turn"], limit)
+                return 1
             db.finish_turn(self.conn, turn["id"], **done)
+            why = f"hit the {limit}-token limit again on retry" if cut_off else "wasn't the JSON asked for"
             db.set_status(self.conn, inc["id"], "triage_failed",
-                          error=f"the model's {turn['session']} reply wasn't the JSON asked for: {res.get('text', '')[:200]}")
+                          error=f"the model's {turn['session']} reply {why}: {res.get('text', '')[:200]}")
             return 1
         if turn["session"] == "remediation":
             db.finish_turn(self.conn, turn["id"], **done)
