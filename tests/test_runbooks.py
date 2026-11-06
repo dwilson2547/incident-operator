@@ -165,9 +165,9 @@ class ScriptedGpu:
     """Answers each submitted job with the next scripted JSON reply."""
 
     def __init__(self, replies):
-        self.replies, self.jobs, self.submitted, self.down = list(replies), {}, [], False
+        self.replies, self.jobs, self.submitted, self.down, self.models = list(replies), {}, [], False, []
 
-    def submit(self, messages, json_schema=None, max_new_tokens=None):
+    def submit(self, messages, json_schema=None, max_new_tokens=None, model=None):
         if self.down:
             raise ConnectionError("down")
         jid = str(uuid.uuid4())
@@ -176,6 +176,7 @@ class ScriptedGpu:
                   if reply is CUT_OFF else {"text": json.dumps(reply), "json": reply, "output_tokens": 300})
         self.jobs[jid] = {"status": "done", "ran_model": "qwen35-9b", "worker": "ainode", "result": result}
         self.submitted.append((messages, json_schema))
+        self.models.append(model)
         return jid
 
     def job(self, jid):

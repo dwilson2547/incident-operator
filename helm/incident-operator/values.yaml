@@ -25,6 +25,12 @@ triage:
   repeatWindowSeconds: 21600              # same problem triaged within 6 h -> marked a repeat, not triaged or mailed
   maxPerHour: 12                          # triage calls per hour; the rest wait
   skipResolvedAfterSeconds: 3600          # a waiting incident resolved over an hour ago is dropped
+  # What the page's "Re-run" can pick (gpu-scheduler has no models API). max_prompt_tokens is checked before sending, at
+  # 3 characters a token: below each model's served context, with room for the reply.
+  rerunModels:
+    - {name: qwen35-9b, label: "Qwen3.5 9B, on the 3080", max_prompt_tokens: 48000}
+    - {name: qwen35-4b, label: "Qwen3.5 4B, on the 3080", max_prompt_tokens: 48000}
+    - {name: gemma4-26b-a4b, label: "Gemma 4 26B, on the Mac", max_prompt_tokens: 12000}
 
 # Read-only queries from runbook operations (promql / promql-range).
 prometheusUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090

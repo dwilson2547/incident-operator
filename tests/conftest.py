@@ -1,6 +1,7 @@
 """Tests that touch the database run against a real Postgres when INCIDENT_OPERATOR_TEST_DATABASE_URL is set to its
-URL. A throwaway one: `docker run -d --name io-pg -e POSTGRES_PASSWORD=<any> -p 127.0.0.1:55444:5432 postgres:17`, then
-point the variable at user postgres, that password, 127.0.0.1:55444, database postgres (README: Develop).
+URL. A throwaway one: `docker run -d --name io-pg -e POSTGRES_PASSWORD=dev -p 127.0.0.1:55444:5432 postgres:17`, then
+PGPASSWORD=dev and postgresql://postgres@127.0.0.1:55444/postgres (README: Develop). Keep the password out of the URL:
+the app tests open their own pool from conn.info.dsn, which leaves it out.
 Each test gets empty tables."""
 import os
 

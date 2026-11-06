@@ -14,9 +14,16 @@ turn stays unprocessed and the next pass tries again, re-running only read-only 
 
 The model is a gpu-scheduler model with a fallback (design §9.2): qwen35-9b on the 3080, gemma4-26b-a4b on the Mac
 after `fallback_after_seconds`, so a busy GPU doesn't hold up triage. Every prompt is stored exactly as sent.
+
+A re-run (`rerun`, db.begin_rerun) is a person asking for another answer with a model they picked: every turn of that
+attempt uses exactly that model, with no fallback, and reads the stored evidence, never the cluster. A comparison needs
+the same input, and the objects are often gone by then. So its investigation is one turn over everything stored, with
+nothing to ask for. It isn't mailed and isn't held by the brakes above, and a proposed fix still needs approving and
+passes fresh pre-checks like any other.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -30,7 +37,7 @@ from .ops import Result, Runner
 
 log = logging.getLogger("incident_operator.triage")
 
-PROMPT_VERSION = "triage-v1"
+PROMPT_VERSION = "triage-v2"
 SYSTEM_PROMPT = ("You are a triage agent, users will provide you with stack traces, error logs, or grafana metrics "
                  "and your job is to identify where the failure happened and advise the user")
 ANSWER_FORMAT = """Answer in plain text with these four headings, briefly:
@@ -83,7 +90,17 @@ class Config:
         return p.read_text().strip() if p.exists() else ""
 
 
-def build_messages(incident: dict, evidence_text: str, primer: str) -> list[dict]:
+def rerun_models(env=os.environ) -> list[dict]:
+    """What a re-run can pick from, from the chart: gpu-scheduler has no models API, and each model's prompt limit
+    depends on the context it is served with: [{"name", "label", "max_prompt_tokens"}]."""
+    return json.loads(env.get("TRIAGE_RERUN_MODELS") or "[]")
+
+
+def estimate_tokens(messages: list[dict]) -> int:
+    return sum(len(m.get("content") or "") for m in messages) // 3    # logs tokenize worse than prose
+
+
+def build_messages(incident: dict, evidence_text: str, primer: str, related: str = "") -> list[dict]:
     system = SYSTEM_PROMPT + ("\n\n" + primer if primer else "") + "\n\n" + ANSWER_FORMAT
     labels = incident["labels"]
     ann = incident["annotations"] or {}
@@ -94,12 +111,13 @@ def build_messages(incident: dict, evidence_text: str, primer: str) -> list[dict
     for key in ("summary", "description", "message"):
         if ann.get(key):
             lines.append(f"{key.capitalize()}: {ann[key]}")
-    user = "\n".join(lines) + "\n\nEvidence collected from the cluster:\n\n" + evidence_text
+    user = ("\n".join(lines) + ("\n\n" + related if related else "")
+            + "\n\nEvidence collected from the cluster:\n\n" + evidence_text)
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
 def fits_fallback(messages: list[dict], cfg: "Config") -> bool:
-    return sum(len(m.get("content") or "") for m in messages) / 3 <= cfg.fallback_max_prompt_tokens
+    return estimate_tokens(messages) <= cfg.fallback_max_prompt_tokens
 
 
 class GpuScheduler:
@@ -109,14 +127,16 @@ class GpuScheduler:
     def _h(self):
         return {"Authorization": f"Bearer {self.cfg.gpu_token}"}
 
-    def submit(self, messages: list[dict], json_schema: dict | None = None, max_new_tokens: int | None = None) -> str:
+    def submit(self, messages: list[dict], json_schema: dict | None = None, max_new_tokens: int | None = None,
+               model: str | None = None) -> str:
+        """`model` pins the job to that model, with no fallback; otherwise the configured model and its fallback."""
         import httpx
         item: dict = {"messages": messages, "max_new_tokens": max_new_tokens or self.cfg.max_new_tokens}
         if json_schema is not None:
             item["json_schema"] = json_schema
-        body = {"model": self.cfg.model, "inputs": [item],
+        body = {"model": model or self.cfg.model, "inputs": [item],
                 "deadline_seconds": self.cfg.deadline_seconds, "max_attempts": 2}
-        if self.cfg.fallback and fits_fallback(messages, self.cfg):
+        if not model and self.cfg.fallback and fits_fallback(messages, self.cfg):
             body |= {"fallback": self.cfg.fallback, "fallback_after_seconds": self.cfg.fallback_after_seconds}
         r = httpx.post(self.cfg.gpu_url + "/v1/jobs", json=body, headers=self._h(), timeout=30)
         r.raise_for_status()
@@ -137,15 +157,25 @@ class Engine:
         self.stopping = False
         self.last_pass: float | None = None      # time of the last pass that completed, for /metrics
 
-    def _fallback(self, messages: list[dict]) -> list[str] | None:
-        """The fallback models this prompt is offered to, as recorded with the turn."""
-        return (self.cfg.fallback or None) if fits_fallback(messages, self.cfg) else None
+    def _submit(self, inc: dict, messages: list[dict], schema: dict | None = None, tokens: int | None = None) -> str:
+        pin = {"model": inc["rerun_model"]} if inc.get("rerun_model") else {}
+        return self.gpu.submit(messages, schema, tokens, **pin)
+
+    def _add_turn(self, inc: dict, messages: list[dict], job_id: str, **fields) -> int:
+        """Record a submitted turn with the model it was offered to, on the incident's current attempt."""
+        pinned = inc.get("rerun_model")
+        fallback = None if pinned else (self.cfg.fallback or None) if fits_fallback(messages, self.cfg) else None
+        return db.add_turn(self.conn, inc["id"], model=pinned or self.cfg.model, fallback=fallback, messages=messages,
+                           gpu_job_id=job_id, attempt=inc.get("attempt", 1), **fields)
+
+    def _related(self, inc: dict) -> str:
+        return investigate.related_block(db.related(self.conn, inc))
 
     def step(self) -> int:
         """One pass of each stage. Returns how many things moved."""
         if self.library:
             self.library.refresh()
-        return self.start_new() + self.poll() + (fixes.step(self.conn, self.library, self.runner) if self.library
+        return self.start_new() + self.start_reruns() + self.poll() + (fixes.step(self.conn, self.library, self.runner) if self.library
                                                  else 0) + self.notify()
 
     def start_new(self) -> int:
@@ -178,18 +208,57 @@ class Engine:
             items = evidence.collect(self.k8s, inc["labels"]) if self.k8s else []
             for it in items:
                 db.add_evidence(self.conn, inc["id"], it.kind, it.source, it.content, it.truncated, it.error)
-            messages = build_messages(inc, evidence.render(items), self.cfg.primer())
+            messages = build_messages(inc, evidence.render(items), self.cfg.primer(), self._related(inc))
             try:
-                job_id = self.gpu.submit(messages)
+                job_id = self._submit(inc, messages)
             except Exception as e:                    # gpu-scheduler unreachable: stays `new`, retried next pass
                 log.warning("submit for incident %s failed: %s", inc["id"], e)
                 self.conn.execute("DELETE FROM evidence WHERE incident_id = %s", (inc["id"],))
                 continue
-            db.add_turn(self.conn, inc["id"], session="triage", prompt_version=PROMPT_VERSION, model=self.cfg.model,
-                        fallback=self._fallback(messages), messages=messages, gpu_job_id=job_id)
+            self._add_turn(inc, messages, job_id, session="triage", prompt_version=PROMPT_VERSION)
             db.set_status(self.conn, inc["id"], "triaging")
             budget -= 1
             log.info("incident %s (%s): %d evidence items, job %s", inc["id"], inc["alertname"], len(items), job_id)
+            n += 1
+        return n
+
+    def start_reruns(self) -> int:
+        n = 0
+        limits = {m["name"]: m.get("max_prompt_tokens") for m in rerun_models()}
+        for inc in db.incidents_with_status(self.conn, "rerun", limit=200):
+            stored = [e for e in db.get_incident(self.conn, inc["id"])["evidence"] if e["trigger"] not in ("pre", "post")]
+            rb = self.library.match(inc["labels"]) if self.library else None
+            related = self._related(inc)
+            if rb:
+                results = [Result(e["operation"] or e["kind"], e["source"], e["content"], e["data"], e["truncated"],
+                                  e["error"]) for e in stored]
+                messages = investigate.first_messages(
+                    inc, rb, inc["target"], results, "(nothing: finish now)", self.cfg.primer(), related, rounds=0,
+                    budget=investigate.PRECURSOR_CHARS + 2 * investigate.REQUESTED_CHARS)
+                schema = investigate.investigation_schema([], final=True)
+                tokens, status = self.cfg.investigate_max_new_tokens, "investigating"
+                turn = dict(session="investigation", prompt_version=investigate.PROMPT_VERSION, json_schema=schema)
+            else:
+                items = [evidence.Item(e["kind"], e["source"], e["content"], e["truncated"], e["error"]) for e in stored]
+                messages = build_messages(inc, evidence.render(items), self.cfg.primer(), related)
+                schema, tokens, status = None, None, "triaging"
+                turn = dict(session="triage", prompt_version=PROMPT_VERSION)
+            limit, size = limits.get(inc["rerun_model"]), estimate_tokens(messages)
+            if limit and size > limit:
+                db.set_status(self.conn, inc["id"], "triage_failed", error=f"this prompt is about {size} tokens, over "
+                              f"{inc['rerun_model']}'s limit of {limit}: nothing was sent. Pick a larger model.")
+                n += 1
+                continue
+            try:
+                job_id = self._submit(inc, messages, schema, tokens)
+            except Exception as e:                    # stays `rerun`, retried next pass
+                log.warning("submit of re-run for incident %s failed: %s", inc["id"], e)
+                continue
+            self._add_turn(inc, messages, job_id, **turn)
+            db.set_status(self.conn, inc["id"], status, runbook=rb.name if rb else None,
+                          runbook_rev=rb.rev if rb else None)
+            log.info("incident %s: re-run %d with %s by %s, %d stored results, job %s", inc["id"], inc["attempt"],
+                     inc["rerun_model"], inc["rerun_by"], len(stored), job_id)
             n += 1
         return n
 
@@ -239,17 +308,17 @@ class Engine:
             target = None
         precursors = self._run_ops(rb.precursors, target, inc["labels"], {})
         menu, menu_txt = investigate.menu_text(rb, self.library.operations)
-        messages = investigate.first_messages(inc, rb, target, precursors, menu_txt, self.cfg.primer())
+        messages = investigate.first_messages(inc, rb, target, precursors, menu_txt, self.cfg.primer(),
+                                              self._related(inc))
         schema = investigate.investigation_schema(menu, final=investigate.MAX_ROUNDS <= 1)
         try:
-            job_id = self.gpu.submit(messages, schema, self.cfg.investigate_max_new_tokens)
+            job_id = self._submit(inc, messages, schema, self.cfg.investigate_max_new_tokens)
         except Exception as e:                        # stays `new`; precursors run again next pass (read-only)
             log.warning("submit for incident %s failed: %s", inc["id"], e)
             return False
         self._store(inc["id"], precursors, "precursor")
-        db.add_turn(self.conn, inc["id"], session="investigation", prompt_version=investigate.PROMPT_VERSION,
-                    model=self.cfg.model, fallback=self._fallback(messages), messages=messages, gpu_job_id=job_id,
-                    turn=1, json_schema=schema)
+        self._add_turn(inc, messages, job_id, session="investigation", prompt_version=investigate.PROMPT_VERSION,
+                       turn=1, json_schema=schema)
         db.set_status(self.conn, inc["id"], "investigating", runbook=rb.name, runbook_rev=rb.rev, target=target)
         log.info("incident %s (%s): runbook %s, target %s, %d precursors, job %s", inc["id"], inc["alertname"],
                  rb.name, target, len(precursors), job_id)
@@ -263,17 +332,17 @@ class Engine:
         if not isinstance(output, dict):
             limit = self.cfg.investigate_max_new_tokens
             cut_off = (res.get("output_tokens") or 0) >= limit
-            if cut_off and sum(t["session"] == turn["session"] and t["turn"] == turn["turn"] for t in inc["turns"]) < 2:
+            if cut_off and sum(t["session"] == turn["session"] and t["turn"] == turn["turn"]
+                               and t["attempt"] == turn["attempt"] for t in inc["turns"]) < 2:
                 messages = investigate.retry_messages(turn["messages"])
                 try:
-                    job_id = self.gpu.submit(messages, turn["json_schema"], limit)
+                    job_id = self._submit(inc, messages, turn["json_schema"], limit)
                 except Exception as e:                # stays unprocessed: the next pass tries again
                     log.warning("retry of turn %d for incident %s failed: %s", turn["turn"], inc["id"], e)
                     return 0
                 db.finish_turn(self.conn, turn["id"], **done)
-                db.add_turn(self.conn, inc["id"], session=turn["session"], prompt_version=turn["prompt_version"],
-                            model=self.cfg.model, fallback=self._fallback(messages), messages=messages,
-                            gpu_job_id=job_id, turn=turn["turn"], json_schema=turn["json_schema"])
+                self._add_turn(inc, messages, job_id, session=turn["session"], prompt_version=turn["prompt_version"],
+                               turn=turn["turn"], json_schema=turn["json_schema"])
                 log.info("incident %s: %s turn %d hit the %d-token limit, retrying", inc["id"], turn["session"],
                          turn["turn"], limit)
                 return 1
@@ -305,7 +374,7 @@ class Engine:
         asked = list(dict.fromkeys(output.get("requests") or []))
         # Checks listed with "done" still run while rounds remain: seen in prod (a 9B listed the log it needed and
         # finished anyway). Read-only, so running one too many costs a turn, never a change.
-        if asked and n < investigate.MAX_ROUNDS:
+        if asked and n < investigate.MAX_ROUNDS and not inc.get("rerun_model"):   # a re-run never reads the cluster
             earlier = {e["operation"]: Result(e["operation"], e["source"], e["content"], e["data"], e["truncated"],
                                               e["error"]) for e in inc["evidence"] if e["operation"]}
             run = [a for a in asked if a in menu]
@@ -314,30 +383,30 @@ class Engine:
                                                  [a for a in asked if a not in menu], investigate.MAX_ROUNDS - 1 - n)
             schema = investigate.investigation_schema(menu, final=n + 1 >= investigate.MAX_ROUNDS)
             try:
-                job_id = self.gpu.submit(messages, schema, self.cfg.investigate_max_new_tokens)
+                job_id = self._submit(inc, messages, schema, self.cfg.investigate_max_new_tokens)
             except Exception as e:
                 log.warning("submit of turn %d for incident %s failed: %s", n + 1, inc["id"], e)
                 return 0
             db.finish_turn(self.conn, turn["id"], **done)
             self._store(inc["id"], results, "requested", round=n)
-            db.add_turn(self.conn, inc["id"], session="investigation", prompt_version=investigate.PROMPT_VERSION,
-                        model=self.cfg.model, fallback=self._fallback(messages), messages=messages,
-                        gpu_job_id=job_id, turn=n + 1, json_schema=schema)
+            self._add_turn(inc, messages, job_id, session="investigation", prompt_version=investigate.PROMPT_VERSION,
+                           turn=n + 1, json_schema=schema)
             log.info("incident %s: turn %d asked for %s", inc["id"], n, asked)
             return 1
         findings = output.get("findings") or {}
         fix_names, fixes_txt = investigate.fixes_text(rb, self.library.operations)
-        messages = investigate.remediation_messages(inc, rb, inc["target"], findings, self.cfg.primer(), fixes_txt)
+        # Built again here, not copied from the first turn: alerts that came in during the investigation count too.
+        messages = investigate.remediation_messages(inc, rb, inc["target"], findings, self.cfg.primer(), fixes_txt,
+                                                    self._related(inc))
         schema = investigate.advice_schema(fix_names)
         try:
-            job_id = self.gpu.submit(messages, schema, self.cfg.investigate_max_new_tokens)
+            job_id = self._submit(inc, messages, schema, self.cfg.investigate_max_new_tokens)
         except Exception as e:
             log.warning("submit of remediation for incident %s failed: %s", inc["id"], e)
             return 0
         db.finish_turn(self.conn, turn["id"], **done)
-        db.add_turn(self.conn, inc["id"], session="remediation", prompt_version=investigate.PROMPT_VERSION,
-                    model=self.cfg.model, fallback=self._fallback(messages), messages=messages, gpu_job_id=job_id,
-                    turn=n + 1, json_schema=schema)
+        self._add_turn(inc, messages, job_id, session="remediation", prompt_version=investigate.PROMPT_VERSION,
+                       turn=n + 1, json_schema=schema)
         db.set_status(self.conn, inc["id"], "advising", findings=findings)
         log.info("incident %s: findings after %d turn(s), confidence %s", inc["id"], n, findings.get("confidence"))
         return 1

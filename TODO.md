@@ -2,6 +2,16 @@
 
 ## Next
 
+- [ ] **Triage a group of alerts as one** (user, 2026-11-05; future step).
+  When several alerts land together, triage one, attach the others, send one email, instead of one model run and one
+  email each. Today each is triaged alone and sees the others through the context block (design §6.7). Worth doing if
+  that block shows the model naming shared causes reliably. Needs a rule for what counts as a group, because nearness
+  in time alone is a poor one.
+
+- [ ] **Run-now and resume as one-click fixes** (user, 2026-11-05: discuss before building).
+  For a failed scheduled job, and a paused job. The runbooks describe these as manual steps today. They need a new
+  annotate verb in the operation kinds and matching rights for the executor, so the scope is the thing to talk through.
+
 - [ ] **Shrink scraper logs further, if prompts still hurt** (idea 2026-11-02, from the Qwen3.8 27B replay).
   Adjacent repeats collapse to `(n) line` since 2026-11-05, which halved the scraper prompts replayed (~8.7k to ~4.3k
   tokens). Not done: collapsing lines that differ only by a counter or URL, keeping error lines with context while

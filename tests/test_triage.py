@@ -18,7 +18,7 @@ class FakeGpu:
     def __init__(self):
         self.jobs, self.submitted, self.down = {}, [], False
 
-    def submit(self, messages, json_schema=None, max_new_tokens=None):
+    def submit(self, messages, json_schema=None, max_new_tokens=None, model=None):
         if self.down:
             raise ConnectionError("gpu-scheduler unreachable")
         jid = str(uuid.uuid4())

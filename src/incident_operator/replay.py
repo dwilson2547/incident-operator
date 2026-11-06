@@ -51,7 +51,7 @@ def _ask(gpu, messages, schema, cfg, timeout) -> tuple[dict | None, str, dict]:
 
 
 def replay_runbook(inc: dict, lib: Library, gpu: GpuScheduler, cfg: Config, timeout: float,
-                   runner: Runner | None = None) -> dict:
+                   runner: Runner | None = None, related: str = "") -> dict:
     rb = lib.match(inc["labels"])
     if rb is None:
         return {"error": "no runbook in the working tree matches this alert"}
@@ -69,7 +69,7 @@ def replay_runbook(inc: dict, lib: Library, gpu: GpuScheduler, cfg: Config, time
             return stored.get(n) or Result(n, n, None, error="not stored for this incident (replay doesn't run checks)")
     pre = [check(n) for n in rb.precursors]
     menu, menu_txt = investigate.menu_text(rb, lib.operations)
-    messages = investigate.first_messages(inc, rb, inc["target"], pre, menu_txt, cfg.primer())
+    messages = investigate.first_messages(inc, rb, inc["target"], pre, menu_txt, cfg.primer(), related)
     turns, findings, model = [], {}, None
     for n in range(1, investigate.MAX_ROUNDS + 1):
         schema = investigate.investigation_schema(menu, final=n >= investigate.MAX_ROUNDS)
@@ -86,7 +86,8 @@ def replay_runbook(inc: dict, lib: Library, gpu: GpuScheduler, cfg: Config, time
         messages = investigate.next_messages(messages, text, results, [a for a in asked if a not in menu],
                                              investigate.MAX_ROUNDS - 1 - n)
     fixes, fixes_txt = investigate.fixes_text(rb, lib.operations)
-    advice, _, _ = _ask(gpu, investigate.remediation_messages(inc, rb, inc["target"], findings, cfg.primer(), fixes_txt),
+    advice, _, _ = _ask(gpu, investigate.remediation_messages(inc, rb, inc["target"], findings, cfg.primer(), fixes_txt,
+                                                            related),
                         investigate.advice_schema(fixes), cfg, timeout)
     return {"runbook": f"{rb.name}@{rb.rev}", "model": model, "turns": turns, "findings": findings, "advice": advice}
 
@@ -133,7 +134,8 @@ def main(argv: list[str]) -> int:
                 "findings": inc["findings"], "advice": inc["advice"],
                 "analysis": None if inc["runbook"] else inc["analysis"]}
         try:
-            now = (replay_runbook(inc, lib, gpu, cfg, a.timeout, runner) if lib.match(inc["labels"])
+            related = investigate.related_block(db.related(conn, inc))
+            now = (replay_runbook(inc, lib, gpu, cfg, a.timeout, runner, related) if lib.match(inc["labels"])
                    else replay_triage(inc, gpu, cfg, a.timeout))
         except Exception as e:
             now = {"error": f"{type(e).__name__}: {e}"}

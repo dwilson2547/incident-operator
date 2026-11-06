@@ -3,7 +3,8 @@
 - webhook (port 8081, Service only, never behind the ingress): `POST /alertmanager`, Alertmanager's webhook receiver,
   and `GET /metrics` for the operator's own alerts. Kept off the UI's port so the ingress can't be used to inject
   alerts.
-- ui (port 8080, LAN ingress): the incident list and detail page, its JSON, and approving or rejecting fixes.
+- ui (port 8080, LAN ingress): the incident list and detail page, its JSON, approving or rejecting fixes, and
+  re-running triage with another model.
 
 Sign-in (oidc.py) is on when OIDC_ISSUER is set, with OIDC_CLIENT_ID, OIDC_CLIENT_SECRET and PUBLIC_URL: then every
 page and API route needs a session, and who may sign in at all is the authentik group bound to the application.
@@ -21,10 +22,12 @@ from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from pydantic import BaseModel
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-from . import __version__, db, oidc
+from . import __version__, db, investigate, oidc
+from .triage import rerun_models
 
 log = logging.getLogger("incident_operator.app")
 
@@ -90,6 +93,10 @@ def create_webhook_app(database_url: str, engine=None) -> FastAPI:
             log.info("alertmanager: %d new incidents, %d re-sent, %d resolved", opened, touched, resolved)
         return {"opened": opened, "updated": touched, "resolved": resolved}
     return app
+
+
+class Rerun(BaseModel):
+    model: str
 
 
 PUBLIC_PATHS = {"/healthz", oidc.FLOW_PATH + "/login", oidc.FLOW_PATH + "/callback"}
@@ -171,6 +178,7 @@ def create_ui_app(database_url: str, library=None, env=None) -> FastAPI:
     page = files("incident_operator").joinpath("static/index.html").read_text()
     current_user = _add_signin(app, env)
     anonymous_ok = env.get("ALLOW_ANONYMOUS_DECISIONS") == "1" and not env.get("OIDC_ISSUER")
+    models = rerun_models(env)
 
     def decider(request: Request) -> str:
         """Who is approving or rejecting. Signed in, or the explicit local-run override; never the open LAN page."""
@@ -179,7 +187,7 @@ def create_ui_app(database_url: str, library=None, env=None) -> FastAPI:
             return user.get("name") or user["sub"]
         if anonymous_ok:
             return "anonymous (local)"
-        raise HTTPException(403, "approving fixes needs sign-in (OIDC_ISSUER is not set)")
+        raise HTTPException(403, "this needs sign-in (OIDC_ISSUER is not set)")
 
     @app.get("/", response_class=HTMLResponse)
     def index():
@@ -194,7 +202,27 @@ def create_ui_app(database_url: str, library=None, env=None) -> FastAPI:
         inc = db.get_incident(c, incident_id)
         if inc is None:
             raise HTTPException(404, "no such incident")
+        inc["related"] = db.related(c, inc)
+        for r in inc["related"]["nearby"]:
+            r["subject"] = investigate.alert_subject(r["labels"])
+        inc["rerun_models"] = models
         return inc
+
+    def json_only(request: Request) -> None:          # a dependency: this has to run before the body is validated
+        if not request.headers.get("content-type", "").startswith("application/json"):
+            raise HTTPException(415, "send application/json")
+
+    @app.post("/api/incidents/{incident_id}/rerun", dependencies=[Depends(json_only)])
+    def rerun(incident_id: int, body: Rerun, request: Request, c=Depends(_conn)):
+        # JSON only, signed in: the same rules as deciding on a fix. It spends GPU time and supersedes a waiting fix.
+        who = decider(request)
+        if body.model not in {m["name"] for m in models}:
+            raise HTTPException(422, f"{body.model!r} isn't a model a re-run can use")
+        why_not = db.begin_rerun(c, incident_id, body.model, who)
+        if why_not:
+            raise HTTPException(404 if why_not == "no such incident" else 409, why_not)
+        log.info("incident %s: re-run with %s by %s", incident_id, body.model, who)
+        return {"ok": True}
 
     @app.get("/api/me")
     def me(request: Request):

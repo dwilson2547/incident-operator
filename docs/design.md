@@ -357,6 +357,20 @@ content from third-party pages. Defences, in order:
 So a model fooled by injected text can at most suggest an operation the runbook already allows, on the host that is
 alerting, and only if that host passes the precondition at that moment.
 
+### 6.7 What else was going on
+
+Each incident is triaged on its own, so nothing in its evidence says that two other scrapers failed the same minute.
+The first prompt of any triage and the remediation prompt carry a short block built by code from the incident list
+(`db.related`, `investigate.related_block`): how many other alerts fired within 1 hour and within 10 minutes of this
+one's start, the nearest 10 by alert name and subject, how long each took to resolve, and how often this same problem
+fired before. The counts are computed because the 9B miscounts lists. The block goes into the remediation prompt from
+code, not through the findings, because a replay showed the 9B dropping the shared cause there. It holds labels and
+times only, never another incident's findings or logs, so text from one incident can't steer another (§6.6).
+
+The earliest of several alerts can't see the later ones when its investigation starts; the block is built again for
+the remediation turn, so it sees whatever has arrived by then. The incident page lists the same neighbours with links.
+Triaging a group as one is a later step (`TODO.md`).
+
 ## 7. Mutating operations
 
 ### 7.1 Autonomy
@@ -406,7 +420,15 @@ as "kill stale mount helpers" is a `RunJob` with a pinned image and a fixed comm
 
 - **Dedup:** one open incident per Alertmanager fingerprint. Re-sends update `last_seen`. A resolved alert marks
   the incident `alert_resolved`. Closing it is separate (a human, or a passing post-check).
-- **Grouping:** alerts that resolve to the same target and runbook within a window attach to one incident.
+- **Grouping:** planned, not built: alerts that resolve to the same target and runbook within a window attach to one
+  incident (`TODO.md`). For now each is triaged alone and sees the others through §6.7.
+- **Re-run:** a signed-in person can ask for another answer from a model they pick, on an answered or failed incident
+  with no fix under way. It stays the same row: `attempt` goes up, the answer it replaces moves to `earlier_attempts`,
+  a fix still waiting is `superseded`. It reads stored evidence only, in one investigation turn with nothing to ask
+  for, so a comparison has the same input and works after the objects are gone. Every turn uses exactly that model, no
+  fallback. No email, and it counts against neither the hourly cap nor the stuck-triage alert. A fix it proposes still
+  needs approving and passes fresh pre-checks. The models on offer are in the chart (`triage.rerunModels`), each with
+  a prompt limit checked before sending, because gpu-scheduler has no models API.
 - **Needs runbook:** incidents with no matching runbook appear in their own list, with the default triage's guess
   and a count of how often that alertname has fired. That list is the to-do list for writing runbooks.
 

@@ -121,6 +121,7 @@ spec:
             - name: GPU_SCHEDULER_TOKEN
               valueFrom: {secretKeyRef: {name: {{ .Values.secrets.gpuScheduler }}, key: GPU_SCHEDULER_TOKEN}}
             - {name: TRIAGE_MODEL, value: {{ .Values.triage.model | quote }}}
+            - {name: TRIAGE_RERUN_MODELS, value: {{ .Values.triage.rerunModels | toJson | quote }}}
             - {name: TRIAGE_FALLBACK, value: {{ .Values.triage.fallback | quote }}}
             - {name: TRIAGE_FALLBACK_AFTER_SECONDS, value: {{ .Values.triage.fallbackAfterSeconds | quote }}}
             - {name: TRIAGE_DEADLINE_SECONDS, value: {{ .Values.triage.deadlineSeconds | quote }}}

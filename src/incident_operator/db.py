@@ -8,12 +8,15 @@ Two brakes keep a noisy alert from turning into a pile of identical reports (tri
 - `repeat`: an incident whose problem key (problem_key()) was triaged within the repeat window is not triaged or
   mailed again; it points at that incident (`repeat_of`). Catches flapping and per-run names (CronJob runs, pods).
 - `skipped`: over the hourly triage cap, incidents wait; one that resolved long before its turn is dropped.
+
+A person can re-run triage on an answered incident with a model they pick (`rerun`, begin_rerun): same row, stored
+evidence, attempt + 1, the answer it replaces kept in `earlier_attempts`.
 """
 from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 import psycopg
 from psycopg.rows import dict_row
@@ -29,7 +32,7 @@ CREATE TABLE IF NOT EXISTS incidents (
     annotations        jsonb NOT NULL,
     generator_url      text,
     status             text NOT NULL DEFAULT 'new'
-                       CHECK (status IN ('new', 'triaging', 'investigating', 'advising', 'analysed', 'triage_failed', 'repeat', 'skipped')),
+                       CHECK (status IN ('new', 'triaging', 'investigating', 'advising', 'analysed', 'triage_failed', 'repeat', 'skipped', 'rerun')),
     runbook            text,                       -- none in phase 1: every incident needs one
     starts_at          timestamptz,
     first_seen         timestamptz NOT NULL DEFAULT now(),
@@ -50,7 +53,7 @@ ALTER TABLE incidents ADD COLUMN IF NOT EXISTS problem_key text;
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS repeat_of bigint REFERENCES incidents (id);
 ALTER TABLE incidents DROP CONSTRAINT IF EXISTS incidents_status_check;
 ALTER TABLE incidents ADD CONSTRAINT incidents_status_check
-    CHECK (status IN ('new', 'triaging', 'investigating', 'advising', 'analysed', 'triage_failed', 'repeat', 'skipped'));
+    CHECK (status IN ('new', 'triaging', 'investigating', 'advising', 'analysed', 'triage_failed', 'repeat', 'skipped', 'rerun'));
 CREATE INDEX IF NOT EXISTS incidents_problem_key ON incidents (problem_key, first_seen DESC);
 CREATE INDEX IF NOT EXISTS incidents_repeat_of ON incidents (repeat_of) WHERE repeat_of IS NOT NULL;
 
@@ -137,6 +140,19 @@ CREATE TABLE IF NOT EXISTS library_last_good (
 );
 CREATE INDEX IF NOT EXISTS op_runs_active ON op_runs (status)
     WHERE status IN ('proposed', 'approved', 'ready', 'running', 'settling');
+
+-- Re-runs (begin_rerun). A re-run keeps the row, because only one incident per fingerprint can be open, so its turns
+-- are told apart by attempt and the answers it replaced are kept here. A fix still waiting when a re-run starts is
+-- `superseded`: nobody decided on it, so it isn't a rejection in the fix's record.
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS attempt int NOT NULL DEFAULT 1;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS rerun_model text;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS rerun_by text;
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS earlier_attempts jsonb NOT NULL DEFAULT '[]';
+ALTER TABLE model_turns ADD COLUMN IF NOT EXISTS attempt int NOT NULL DEFAULT 1;
+ALTER TABLE op_runs DROP CONSTRAINT IF EXISTS op_runs_status_check;
+ALTER TABLE op_runs ADD CONSTRAINT op_runs_status_check
+    CHECK (status IN ('suggested', 'proposed', 'approved', 'rejected', 'refused', 'ready', 'running', 'settling',
+                      'failed', 'succeeded', 'post_failed', 'superseded'));
 """
 
 
@@ -225,7 +241,8 @@ def last_triaged(conn: psycopg.Connection, key: str | None, within_seconds: int,
     row = conn.execute(
         """
         SELECT id FROM incidents
-        WHERE problem_key = %s AND id <> %s AND status IN ('triaging', 'analysed', 'triage_failed')
+        WHERE problem_key = %s AND id <> %s
+          AND status IN ('triaging', 'investigating', 'advising', 'analysed', 'triage_failed', 'rerun')
           AND first_seen > now() - make_interval(secs => %s)
         ORDER BY first_seen DESC LIMIT 1
         """,
@@ -235,9 +252,10 @@ def last_triaged(conn: psycopg.Connection, key: str | None, within_seconds: int,
 
 
 def triages_since(conn: psycopg.Connection, seconds: int) -> int:
-    """Incidents whose triage started in the window (an investigation's later turns don't count again)."""
+    """Incidents whose triage started in the window (an investigation's later turns don't count again). The cap is
+    against alert storms: a re-run someone asked for doesn't count, so comparing models can't hold back a real alert."""
     return conn.execute(
-        "SELECT count(*) AS n FROM model_turns WHERE turn = 1 AND session IN ('triage', 'investigation')"
+        "SELECT count(*) AS n FROM model_turns WHERE turn = 1 AND attempt = 1 AND session IN ('triage', 'investigation')"
         " AND submitted_at > now() - make_interval(secs => %s)", (seconds,)).fetchone()["n"]
 
 
@@ -259,15 +277,15 @@ def add_evidence(conn: psycopg.Connection, incident_id: int, kind: str, source: 
 
 def add_turn(conn: psycopg.Connection, incident_id: int, *, session: str, prompt_version: str, model: str,
              fallback: list[str] | None, messages: list[dict], gpu_job_id, turn: int = 1,
-             json_schema: dict | None = None) -> int:
+             json_schema: dict | None = None, attempt: int = 1) -> int:
     return conn.execute(
         """
         INSERT INTO model_turns (incident_id, session, prompt_version, model, fallback, messages, gpu_job_id, turn,
-                                 json_schema)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                                 json_schema, attempt)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
         """,
         (incident_id, session, prompt_version, model, fallback, Jsonb(messages), gpu_job_id, turn,
-         Jsonb(json_schema) if json_schema is not None else None),
+         Jsonb(json_schema) if json_schema is not None else None, attempt),
     ).fetchone()["id"]
 
 
@@ -291,6 +309,39 @@ def finish_turn(conn: psycopg.Connection, turn_id: int, *, status: str, result: 
         (status, Jsonb(result) if result is not None else None, ran_model, worker, error,
          Jsonb(output) if output is not None else None, turn_id),
     )
+
+
+RERUNNABLE = ("analysed", "triage_failed")
+FIX_UNDER_WAY = ("approved", "ready", "running", "settling")
+
+
+def begin_rerun(conn: psycopg.Connection, incident_id: int, model: str, who: str) -> str | None:
+    """Queue a re-run with this model: keep the current answer in `earlier_attempts`, supersede a fix still waiting for
+    a decision, and mark the incident mailed so the new answer isn't. Returns why it can't start, or None if it did."""
+    with conn.transaction():
+        inc = conn.execute("SELECT * FROM incidents WHERE id = %s FOR UPDATE", (incident_id,)).fetchone()
+        if inc is None:
+            return "no such incident"
+        if inc["status"] not in RERUNNABLE:
+            return f"it is {inc['status']}: only an answered or failed incident can be re-run"
+        if conn.execute("SELECT 1 FROM op_runs WHERE incident_id = %s AND status = ANY(%s) LIMIT 1",
+                        (incident_id, list(FIX_UNDER_WAY))).fetchone():
+            return "a fix is under way on this incident"
+        earlier = {k: inc[k] for k in ("attempt", "status", "analysis", "analysis_model", "analysis_worker", "findings",
+                                       "advice", "error", "runbook", "runbook_rev", "rerun_by")}
+        earlier["replaced_at"] = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "UPDATE op_runs SET status = 'superseded', finished_at = now()"
+            " WHERE incident_id = %s AND status = 'proposed'", (incident_id,))
+        conn.execute(
+            """
+            UPDATE incidents SET status = 'rerun', attempt = attempt + 1, rerun_model = %s, rerun_by = %s,
+                earlier_attempts = earlier_attempts || %s, analysis = NULL, analysis_model = NULL,
+                analysis_worker = NULL, findings = NULL, advice = NULL, error = NULL,
+                notified_at = coalesce(notified_at, now())
+            WHERE id = %s
+            """, (model, who, Jsonb([earlier]), incident_id))
+    return None
 
 
 def to_notify(conn: psycopg.Connection) -> list[dict]:
@@ -330,7 +381,7 @@ def decide_op_run(conn: psycopg.Connection, run_id: int, approve: bool, who: str
     return row is not None
 
 
-_FINAL = ("refused", "rejected", "failed", "succeeded", "post_failed")
+_FINAL = ("refused", "rejected", "failed", "succeeded", "post_failed", "superseded")
 
 
 def update_op_run(conn: psycopg.Connection, run_id: int, status: str, *, checks: str | None = None,
@@ -418,7 +469,8 @@ def health(conn: psycopg.Connection) -> dict:
     out |= conn.execute(
         """
         SELECT coalesce(extract(epoch FROM now() - min(first_seen) FILTER (
-                   WHERE status IN ('new', 'triaging', 'investigating', 'advising'))), 0) AS oldest_waiting,
+                   WHERE status IN ('new', 'triaging', 'investigating', 'advising') AND attempt = 1)), 0)
+                   AS oldest_waiting,                  -- a re-run of an old incident isn't an alert waiting for triage
                coalesce(extract(epoch FROM now() - min(first_seen) FILTER (
                    WHERE status IN ('analysed', 'triage_failed') AND notified_at IS NULL)), 0) AS oldest_unmailed
         FROM incidents
@@ -480,6 +532,41 @@ def get_incident(conn: psycopg.Connection, incident_id: int) -> dict | None:
         "SELECT id, labels, first_seen, last_seen, alert_resolved_at FROM incidents WHERE repeat_of = %s"
         " ORDER BY first_seen DESC LIMIT 100", (incident_id,)).fetchall()
     return inc
+
+
+RELATED_WINDOW_SECONDS = 3600     # other alerts this close count as "around" this one
+RELATED_CLOSE_SECONDS = 600       # counted apart: alerts fired by one cause tend to land within minutes
+_AT = "coalesce(starts_at, first_seen)"
+
+
+def related(conn: psycopg.Connection, inc: dict, limit: int = 50) -> dict:
+    """What else was going on, from the incident list alone: any other alert around this one's time, nearest first, and
+    how often this same problem fired before it. Measured from this incident, not from now, so a re-run of an old one
+    sees its own moment. Alerts that came in after it are included if they are in by now."""
+    at = inc.get("starts_at") or inc["first_seen"]
+    args = {"at": at, "id": inc["id"], "key": inc.get("problem_key"), "window": RELATED_WINDOW_SECONDS,
+            "close": RELATED_CLOSE_SECONDS, "limit": limit}
+    nearby = conn.execute(
+        f"""
+        SELECT id, alertname, labels, status, repeat_of,
+               extract(epoch FROM {_AT} - %(at)s)::float AS offset_seconds,
+               extract(epoch FROM alert_resolved_at - {_AT})::float AS fired_seconds,
+               count(*) OVER () AS total,
+               count(*) FILTER (WHERE abs(extract(epoch FROM {_AT} - %(at)s)) <= %(close)s) OVER () AS close
+        FROM incidents
+        WHERE id <> %(id)s AND problem_key IS DISTINCT FROM %(key)s
+          AND abs(extract(epoch FROM {_AT} - %(at)s)) <= %(window)s
+        ORDER BY abs(extract(epoch FROM {_AT} - %(at)s)), id LIMIT %(limit)s
+        """, args).fetchall()
+    earlier = conn.execute(
+        f"""
+        SELECT id, status, extract(epoch FROM %(at)s - {_AT})::float AS age_seconds, count(*) OVER () AS total
+        FROM incidents WHERE problem_key = %(key)s AND id <> %(id)s AND {_AT} < %(at)s
+        ORDER BY {_AT} DESC LIMIT 5
+        """, args).fetchall()
+    return {"nearby": nearby, "nearby_total": nearby[0]["total"] if nearby else 0,
+            "nearby_close": nearby[0]["close"] if nearby else 0, "earlier": earlier,
+            "earlier_total": earlier[0]["total"] if earlier else 0}
 
 
 def runbook_usage(conn: psycopg.Connection) -> list[dict]:

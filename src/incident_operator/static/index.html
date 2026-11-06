@@ -42,7 +42,7 @@ tbody tr.click:hover { background: var(--surface-2); }
   background: var(--surface-2); border: 1px solid var(--border); white-space: nowrap; }
 .tag::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--c, var(--muted)); }
 .s-new, .s-triaging { --c: var(--warning); } .s-analysed { --c: var(--good); } .s-triage_failed { --c: var(--critical); }
-.s-repeat, .s-skipped { --c: var(--muted); } .s-investigating, .s-advising { --c: var(--accent); }
+.s-repeat, .s-skipped { --c: var(--muted); } .s-investigating, .s-advising, .s-rerun { --c: var(--accent); }
 nav a { color: var(--text-2); padding: 4px 8px; border-radius: 6px; } nav a.on { color: var(--text); background: var(--surface-2); }
 .turn { border-top: 1px solid var(--border); padding: 10px 0; } .turn:first-child { border-top: 0; padding-top: 0; }
 .findings { font-size: 14.5px; line-height: 1.55; } .findings .t { white-space: pre-wrap; }
@@ -63,11 +63,14 @@ pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px
 details { margin-top: 8px; } summary { cursor: pointer; color: var(--text-2); }
 .err { color: var(--critical); }
 .f-proposed { --c: var(--warning); } .f-approved, .f-ready, .f-running, .f-settling { --c: var(--accent); }
+.f-superseded { --c: var(--muted); }
 .f-succeeded { --c: var(--good); } .f-failed, .f-post_failed, .f-refused { --c: var(--critical); }
 .fix { border-top: 1px solid var(--border); padding: 12px 0 4px; } .fix:first-child { border-top: 0; padding-top: 0; }
 .fix .actions { display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button:disabled { opacity: .5; cursor: default; }
+select { font: inherit; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; }
+.rerun { display: flex; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); align-items: center; flex-wrap: wrap; }
 </style>
 </head>
 <body>
@@ -99,11 +102,11 @@ const ago = t => t ? dur((Date.now() - new Date(t)) / 1000) + " ago" : "–";
 const clock = t => t ? new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "–";
 const TARGET = ["namespace", "pod", "job_name", "deployment", "statefulset", "daemonset", "node", "instance"];
 const target = l => TARGET.filter(k => l[k]).map(k => `${k}=${l[k]}`).join(" ");
-const STATUS = { new: "new", triaging: "triaging", investigating: "investigating", advising: "advising", analysed: "analysed", triage_failed: "triage failed", repeat: "repeat", skipped: "skipped" };
+const STATUS = { new: "new", triaging: "triaging", investigating: "investigating", advising: "advising", analysed: "analysed", triage_failed: "triage failed", repeat: "repeat", skipped: "skipped", rerun: "re-run queued" };
 const state = { lastOk: null, me: { user: null, can_decide: false } };
 const FIX = { suggested: "suggested: run it yourself", proposed: "awaiting approval", approved: "approved: pre-checking",
   rejected: "rejected", refused: "refused", ready: "waiting for the executor", running: "running",
-  settling: "done: post-checks soon", failed: "failed", succeeded: "succeeded", post_failed: "post-check failed" };
+  settling: "done: post-checks soon", failed: "failed", succeeded: "succeeded", post_failed: "post-check failed", superseded: "replaced by a re-run" };
 const fixTag = st => `<span class="tag f-${esc(st)}">${esc(FIX[st] || st)}</span>`;
 const lget = k => { try { return localStorage.getItem("io." + k); } catch { return null; } };
 const lset = (k, v) => { try { localStorage.setItem("io." + k, v); } catch {} };
@@ -163,7 +166,8 @@ function renderList(d) {
 function renderIncident(i) {
   const ann = i.annotations || {};
   const turn = i.turns[i.turns.length - 1];   // the generic (no-runbook) answer shows its fallback model
-  state.incidentLive = ["new", "triaging", "investigating", "advising"].includes(i.status)
+  const turns = i.turns.filter(t => t.attempt === i.attempt);
+  state.incidentLive = ["new", "triaging", "investigating", "advising", "rerun"].includes(i.status)
     || i.fixes.some(f => ["approved", "ready", "running", "settling"].includes(f.status));
   // Re-rendering replaces every element: keep open sections and scroll positions as the user left them (same incident only).
   const view = $("#view-incident"), keep = view.dataset.id === String(i.id);
@@ -177,14 +181,16 @@ function renderIncident(i) {
         <h2>${esc(i.alertname)} <span class="tag s-${esc(i.status)}" style="text-transform:none">${esc(STATUS[i.status] || i.status)}</span></h2>
         <div class="card">
           ${i.status === "analysed" && i.findings ? findingsHtml(i)
-              + `<p class="muted" style="margin:12px 0 0;font-size:12.5px">Answered by <b>${esc(i.analysis_model)}</b> on ${esc(i.analysis_worker || "?")} after ${new Set(i.turns.filter(t => t.session === "investigation").map(t => t.turn)).size} investigation turn(s)${i.fixes.some(f => f.started_at) ? "" : " · nothing was changed"}</p>`
+              + `<p class="muted" style="margin:12px 0 0;font-size:12.5px">Answered by <b>${esc(i.analysis_model)}</b> on ${esc(i.analysis_worker || "?")} after ${new Set(turns.filter(t => t.session === "investigation").map(t => t.turn)).size} investigation turn(s)${i.attempt > 1 ? ` · re-run ${i.attempt - 1}, stored evidence` : ""}${i.fixes.some(f => f.started_at) ? "" : " · nothing was changed"}</p>`
             : i.status === "analysed" ? `<div class="answer">${esc(i.analysis)}</div>
               <p class="muted" style="margin:12px 0 0;font-size:12.5px">Answered by <b>${esc(i.analysis_model)}</b> on ${esc(i.analysis_worker || "?")}${turn && turn.ran_model && turn.ran_model !== turn.model ? ` (fallback from ${esc(turn.model)})` : ""} · suggestion only, nothing was changed</p>`
             : i.status === "triage_failed" ? `<div class="err">The model couldn't analyse this: ${esc(i.error || "unknown error")}</div>`
             : i.status === "repeat" ? `<div>The same problem was triaged recently, so this wasn't triaged or mailed again. See <a href="#/incident/${i.repeat_of}">incident #${i.repeat_of}</a>.</div>`
             : i.status === "skipped" ? `<div class="muted">${esc(i.error || "Not triaged.")}</div>`
-            : `<div class="muted">${i.status === "new" ? "Collecting evidence…" : i.status === "investigating" ? `Investigating with runbook ${esc(i.runbook)}, turn ${i.turns.length}…` : i.status === "advising" ? "Findings are in; writing the suggestion…" : "Waiting for the model…"} This page refreshes on its own.</div>${i.findings ? findingsHtml(i) : ""}`}
+            : `<div class="muted">${i.status === "rerun" ? `Re-running with ${esc(i.rerun_model)}…` : i.status === "new" ? "Collecting evidence…" : i.status === "investigating" ? `Investigating with runbook ${esc(i.runbook)}, turn ${turns.length}…` : i.status === "advising" ? "Findings are in; writing the suggestion…" : "Waiting for the model…"} This page refreshes on its own.</div>${i.findings ? findingsHtml(i) : ""}`}
+          ${rerunHtml(i)}
         </div>
+        ${i.earlier_attempts.length ? `<h2>Earlier answers (${i.earlier_attempts.length})</h2><div class="card">${[...i.earlier_attempts].reverse().map(earlierHtml).join("")}</div>` : ""}
         ${i.fixes.length ? `<h2>Fix</h2><div class="card">${i.fixes.map(fixHtml).join("")}</div>` : ""}
         ${i.repeats.length ? `<h2>Fired again since (${i.repeats.length}${i.repeats.length === 100 ? "+" : ""}), not triaged again</h2>
           <div class="card scroll" style="padding:0"><table><thead><tr><th>#</th><th>Fired</th><th>Target</th><th>Resolved</th></tr></thead><tbody>
@@ -197,6 +203,7 @@ function renderIncident(i) {
         ${i.turns.length ? `<h2>Model turns</h2><div class="card">${i.turns.map(turnHtml).join("")}</div>` : ""}
       </div>
       <div>
+        ${relatedHtml(i.related)}
         <h2>Alert</h2>
         <div class="card"><dl class="kv">
           <dt>Severity</dt><dd>${esc(i.severity || "–")}</dd>
@@ -215,6 +222,31 @@ function renderIncident(i) {
   if (scrolled) view.querySelectorAll("pre, .scroll").forEach((e, k) => { if (k < scrolled.length) [e.scrollTop, e.scrollLeft] = scrolled[k]; });
 }
 
+// A re-run is offered on anything answered, unless a fix is running on it (the server refuses that too).
+function rerunHtml(i) {
+  if (!["analysed", "triage_failed"].includes(i.status) || !i.rerun_models.length || i.fixes.some(f => ["approved", "ready", "running", "settling"].includes(f.status))) return "";
+  if (!state.me.can_decide) return `<div class="rerun muted" style="font-size:12.5px">Sign in to re-run this with another model.</div>`;
+  const pick = state.rerunModel || (i.analysis_model && i.rerun_models.some(m => m.name === i.analysis_model) ? i.analysis_model : i.rerun_models[0].name);
+  return `<div class="rerun"><select id="rerun-model" title="Model">${i.rerun_models.map(m => `<option value="${esc(m.name)}" ${m.name === pick ? "selected" : ""}>${esc(m.label || m.name)}</option>`).join("")}</select>
+    <button data-rerun="${i.id}">Re-run triage</button>
+    <span class="muted" style="font-size:12.5px">Reads the stored evidence, not the cluster, and sends no email.${i.fixes.some(f => f.status === "proposed") ? " The fix waiting for approval is replaced." : ""}</span></div>`;
+}
+
+function earlierHtml(a) {
+  const f = a.findings;
+  return `<details class="turn"><summary>Attempt ${a.attempt}: ${esc(a.analysis_model || "no answer")}${a.analysis_worker ? " on " + esc(a.analysis_worker) : ""}${a.rerun_by ? ` <span class="muted">· re-run by ${esc(a.rerun_by)}</span>` : ""}${a.status === "triage_failed" ? ` <span class="err">failed</span>` : ""} <span class="muted">· replaced ${ago(a.replaced_at)}</span></summary>
+    ${f ? findingsHtml(a) : a.analysis ? `<div class="answer" style="margin-top:8px">${esc(a.analysis)}</div>` : `<div class="err" style="margin-top:8px">${esc(a.error || "no answer")}</div>`}</details>`;
+}
+
+function relatedHtml(r) {
+  const off = s => Math.abs(s) < 60 ? "same time" : `${dur(Math.abs(s))} ${s < 0 ? "earlier" : "later"}`;
+  return `<h2>Around this alert</h2><div class="card scroll" style="padding:0">${r.nearby.length ? `<table><thead><tr><th>#</th><th>When</th><th>Alert</th></tr></thead><tbody>
+      ${r.nearby.map(n => `<tr><td><a href="#/incident/${n.id}">${n.id}</a></td><td style="white-space:nowrap">${off(n.offset_seconds)}</td><td>${esc(n.alertname)}<div class="muted" style="font-size:12px">${esc(n.subject) || "–"}</div></td></tr>`).join("")}</tbody></table>`
+      : `<div class="muted" style="padding:10px 14px;font-size:13px">No other alerts within an hour.</div>`}
+    ${r.nearby_total > r.nearby.length ? `<div class="muted" style="padding:6px 14px;font-size:12px">The nearest ${r.nearby.length} of ${r.nearby_total}.</div>` : ""}
+    ${r.earlier.length ? `<div style="padding:8px 14px;font-size:13px;border-top:1px solid var(--border)">Same problem before: ${r.earlier_total}×. Latest: ${r.earlier.map(e => `<a href="#/incident/${e.id}">${dur(e.age_seconds)} before</a>`).join(", ")}</div>` : ""}</div>`;
+}
+
 function fixHtml(f) {
   const can = f.status === "proposed" && state.me.can_decide;
   return `<div class="fix"><div><b>${esc(f.operation)}</b> ${fixTag(f.status)} <span class="muted" style="font-size:12px">autonomy ${esc(f.autonomy)} · proposed ${ago(f.proposed_at)}</span></div>
@@ -230,6 +262,16 @@ function fixHtml(f) {
         : `<span class="muted">Sign in to approve or reject.</span>`}<span class="muted" style="font-size:12.5px">Pre-checks run when you approve; if the situation has changed, the fix is refused.</span></div>` : ""}</div>`;
 }
 
+document.addEventListener("change", e => { if (e.target.id === "rerun-model") state.rerunModel = e.target.value; });
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button[data-rerun]");
+  if (!b) return;
+  b.disabled = true;
+  try { await api(`/api/incidents/${b.dataset.rerun}/rerun`, { model: $("#rerun-model").value }); }
+  catch (err) { alert("Didn't go through: " + err.message); }
+  state.rerunModel = null;
+  refresh();
+});
 document.addEventListener("click", async e => {
   const b = e.target.closest("button[data-fix]");
   if (!b) return;
@@ -260,7 +302,7 @@ function turnHtml(t) {
   const what = !o ? "" : t.session === "investigation"
     ? (o.action === "request" ? `asked for <b>${esc((o.requests || []).join(", "))}</b>` : "finished with findings") + (o.reason ? ` <span class="muted">: ${esc(o.reason)}</span>` : "")
     : t.session === "remediation" ? "wrote the suggestion" : "";
-  return `<div class="turn"><div>${t.turn}. <b>${esc(t.session)}</b> · ${t.status === "submitted" ? `<span class="muted">waiting for ${esc(t.model)}…</span>`
+  return `<div class="turn"><div>${t.attempt > 1 ? `<span class="muted">re-run ${t.attempt - 1}:</span> ` : ""}${t.turn}. <b>${esc(t.session)}</b> · ${t.status === "submitted" ? `<span class="muted">waiting for ${esc(t.model)}…</span>`
       : `${esc(t.ran_model || t.model)}${t.worker ? " on " + esc(t.worker) : ""}${t.ran_model && t.ran_model !== t.model ? ` <span class="muted">(fallback from ${esc(t.model)})</span>` : ""}${took ? ` · ${took}` : ""}${r.input_tokens ? ` · ${r.input_tokens} in / ${r.output_tokens} out tokens` : ""}`}</div>
     ${what ? `<div style="margin-top:4px">${what}</div>` : ""}${t.status === "failed" ? `<div class="err">${esc(t.error)}</div>` : ""}
     <details><summary>Exactly what was sent (${esc(t.prompt_version)})</summary>
