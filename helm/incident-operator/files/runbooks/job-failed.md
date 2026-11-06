@@ -25,10 +25,11 @@ one-off) never run again by themselves.
 - Errors naming another service (connection refused, timeout, DNS) mean the cause is that service.
 
 ## Remediation
-- OOMKilled: raise the memory limit in the Job's manifest or values, in git.
+- OOMKilled: raise the memory limit in the manifest or values of whatever creates the Job (its CronJob, chart), in git.
+  Doubling it is a fair start. Never work out a limit from the amount of data the logs mention.
 - DeadlineExceeded: say which step it was on. Raise activeDeadlineSeconds only if the logs show it progressing.
 - A clear error (config, missing secret, permissions, code bug): name the log line and the fix. A retry fails the same way.
 - A dependency down or a one-off network error, from a CronJob: the next scheduled run will likely succeed; say so. Not
   from a CronJob: it needs running again once the dependency is back.
-- Always end with clearing it, once the cause is understood: `kubectl -n <namespace> delete job <name>`. The alert
-  fires until then. Deleting it fixes nothing by itself, so never offer it as the fix.
+- Every suggestion ends with this step, whatever the cause: once fixed, `kubectl -n <namespace> delete job <name>`,
+  because the alert fires until the failed Job is gone. It is cleanup, never the fix.

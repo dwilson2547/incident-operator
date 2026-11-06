@@ -17,9 +17,10 @@ Tower isn't a cluster node: nothing here can see inside the container, and docke
 ## Investigation
 - tower-container-now: cores now, hours since the container started, and the busiest containers. Below 1 core now
   means the load has ended: say so.
-- tower-container-cpu, cores: the shape over 24h. Flat near a whole number is a pegged thread; bursty is real
-  work coming and going. Give the time it started.
-- cores_yesterday is the same hours one day earlier. Similar shape at similar hours is a daily schedule.
+- tower-container-cpu, cores: the shape over 24h, hourly, newest last. Flat near a whole number is a pegged thread;
+  bursty is real work coming and going. Say how many hours ago it started; the data has no clock times.
+- cores_yesterday is the same hours one day earlier. Compare the two position by position, even if the load has ended:
+  load at the same positions in both is a daily schedule, and say so in your findings.
 - Started right after the container did: startup work, such as a scan or an index.
 - tower-load: only if the server as a whole may be affected.
 
@@ -27,7 +28,7 @@ Tower isn't a cluster node: nothing here can see inside the container, and docke
 - A daily schedule, or plex's scheduled tasks (they run overnight): expected load, nothing to fix. If it pages too often,
   change the exclusion in the TowerContainerCPUSustained rule (tower-alerts, cluster-config).
 - Plex at another time: check Settings > Status > Dashboard for a long transcode.
-- Load ended, no pattern: nothing can be checked now; ask to run `docker top <name>` if it returns.
+- Load ended and yesterday's data shows no load at those hours: nothing can be checked now; ask to run `docker top <name>` if it returns.
 - New, steady load with no matching yesterday and no known job: escalate. A low, steady load is also what a throttled
   miner looks like. On Tower, run `docker top <name>` several times, since short-lived unknown processes may show only for
   seconds, and `docker logs --tail 100 <name>`. Say this can't be told from CPU data: never call it a miner or call it safe.

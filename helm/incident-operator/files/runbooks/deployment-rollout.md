@@ -32,7 +32,8 @@ blame it or investigate it.
 - deployment-replicas-6h: when it began, and whether it is flapping or steady.
 
 ## Remediation
-- Cleared by now: say nothing is needed, and when it recovered if the data shows it.
+- Cleared by now: nothing to do now; say when it recovered if the data shows it. It did fail, so never call it a false
+  positive. If it fired for a deploy that has since gone through, say the rollout was slow or got fixed.
 - Everything goes through git: Argo reverts kubectl edits, so no `kubectl rollout undo` or manual scaling. To get back
   fast, revert the image tag or value in the app's repo.
 - Image can't be pulled: name the image; fix the tag in values, or publish the image if CI never pushed it.
