@@ -1,0 +1,27 @@
+name: resume-scrapejob
+description: Take this ScrapeJob out of Suspended with one probe run. Success recovers it; failure suspends it again, without more mail.
+mutating: true
+autonomy: suggest                 # the scraper runbook raises it to approve
+params:
+  namespace: {from: target.namespace}
+  name: {from: target.name}
+# Only a Suspended job: on any other the operator marks the annotation handled and does nothing. The exit codes are as
+# in run-scrapejob-now; a new scraper image retests a suspended job by itself, so a code fix doesn't need this.
+pre:
+  - {op: scrapejob-status, expect: "status.phase == \"Suspended\""}
+  - {op: scrapejob-status, expect: "status.currentRun.k8sJob == null"}
+  - {op: scrapejob-status, expect: "status.lastRun.exitCode != 65"}
+  - {op: scrapejob-status, expect: "status.lastRun.exitCode != 137"}
+run:
+  verb: AnnotateScrapeJob
+  namespaces: [gyopart, motorcycles]
+  namespace: "{namespace}"
+  name: "{name}"
+  action: resume
+# Suspended again this soon means the probe already failed, so the fix didn't take.
+post:
+  settle: 180
+  checks:
+    - {op: scrapejob-status, expect: "status.phase != \"Suspended\""}
+    - {op: scrapejob-recent-start, expect: "started.0.value >= 1"}
+limits: {perTarget: 1/6h, global: 10/24h}

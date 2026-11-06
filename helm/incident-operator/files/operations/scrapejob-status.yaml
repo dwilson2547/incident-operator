@@ -8,5 +8,5 @@ run:
   kind: k8s-get
   path: /apis/scrape.danwils.com/v1alpha1/namespaces/{namespace}/scrapejobs/{name}
   fields: [status.phase, status.consecutiveFailures, status.lastRun, status.lastSuccess, status.recentItems,
-           status.baselineItems, status.stale, status.suspended, status.events, spec.scraperRef]
+           status.baselineItems, status.stale, status.suspended, status.events, status.currentRun, spec.scraperRef]
 budget: {maxChars: 2500}

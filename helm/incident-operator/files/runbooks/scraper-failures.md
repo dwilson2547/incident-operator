@@ -8,7 +8,7 @@ match:
 priority: 10
 target: {kind: ScrapeJob, name: scrape_job, namespace: exported_namespace}
 precursors: [scrapejob-status, scrape-last-run, scrape-stack-health]
-operations: [scrape-history-7d]
+operations: [scrape-history-7d, {run-scrapejob-now: {autonomy: approve}}, {resume-scrapejob: {autonomy: approve}}]
 ---
 
 ## What this looks like
@@ -38,7 +38,6 @@ Use the first that fits, then add the Suspended or Failing line.
 - Transient (75) on this site only: the site is down or slow; the operator retries it.
 - Out of memory (137): raise the ScrapeJob's memory limit in its values.
 - Failing: one failed run, still scheduled. Never mention resuming. Say if the next run will likely fail the same way.
-  To test a fix now: `kubectl -n <namespace> annotate scrapejob <name> scrape.danwils.com/run-now=$(date +%s) --overwrite`
-- Suspended: retrying has STOPPED, whatever the exit code; never say it fixes itself. After the fix:
-  `kubectl -n <namespace> annotate scrapejob <name> scrape.danwils.com/resume=$(date +%s) --overwrite`
-  That is one probe run: success recovers it, failure suspends it again.
+  If a new run could pass (blocked, transient, or to test a fix), propose run-scrapejob-now.
+- Suspended: retrying has STOPPED, whatever the exit code; never say it fixes itself. Propose resume-scrapejob unless a
+  code or memory change must come first. That is one probe run: success recovers it, failure suspends it again.

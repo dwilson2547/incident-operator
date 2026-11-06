@@ -29,13 +29,17 @@ class Cluster(FakeK8s):
 
     def __init__(self, routes):
         super().__init__(routes)
-        self.deleted, self.posted = [], []
+        self.deleted, self.posted, self.patched = [], [], []
 
     def delete(self, path, params=None):
         self.deleted.append(path)
 
     def post(self, path, body):
         self.posted.append((path, body))
+        return body
+
+    def patch(self, path, body):
+        self.patched.append((path, body))
         return body
 
 
@@ -308,8 +312,98 @@ def test_chart_generates_rbac_from_the_fix_files():
                          text=True, check=True).stdout
     roles = [d for d in out.split("\n---\n") if "kind: Role\n" in d and "incident-operator-fix-" in d]
     assert sorted((r.split("namespace: ")[1].split("\n")[0], "delete" in r, "create" in r) for r in roles) == [
-        ("kube-system", True, False), ("offsite-backup", False, True), ("postgres", False, True),
-        ("secrets-backup", False, True)]
+        ("gyopart", False, False), ("gyopart", False, False), ("kube-system", True, False),
+        ("motorcycles", False, False), ("motorcycles", False, False), ("offsite-backup", False, True),
+        ("postgres", False, True), ("secrets-backup", False, True)]
+    assert all("verbs: [patch]" in r and "resources: [scrapejobs]" in r
+               for r in roles if "namespace: gyopart" in r or "namespace: motorcycles" in r)
+
+
+# -- run-now and resume ------------------------------------------------------------------------------------------------
+
+SJOB = "/apis/scrape.danwils.com/v1alpha1/namespaces/gyopart/scrapejobs/site-a"
+SITE = {"target": {"kind": "ScrapeJob", "name": "site-a", "namespace": "gyopart"}, "labels": {}}
+
+
+class JobStartProm:
+    """Prometheus for the post-checks: `started` Jobs of the ScrapeJob."""
+
+    def __init__(self, started):
+        self.started = started
+
+    def get(self, path, params):
+        assert 'job_name=~"site-a-[0-9]+-[0-9]+"' in params["query"]
+        return {"result": [{"metric": {}, "value": [0, str(self.started)]}] if self.started else []}
+
+
+def _checks(which, status, started=0):
+    lib = load(CHART)
+    op = lib.operations["run-scrapejob-now" if which.startswith("run") else "resume-scrapejob"]
+    runner = Runner(Cluster({SJOB: {"status": status, "spec": {"scraperRef": "s"}}}), JobStartProm(started))
+    return fixes.run_checks(runner, lib, op.post if which.endswith("post") else op.pre, SITE)
+
+
+def test_shipped_scrapejob_fixes_load_and_wait_for_approval():
+    lib = load(CHART)
+    assert not {"run-scrapejob-now", "resume-scrapejob"} & set(lib.runbooks["scraper-failures"].operations)
+    assert lib.runbooks["scraper-failures"].fixes == {"run-scrapejob-now": "approve", "resume-scrapejob": "approve"}
+    assert fixes.command(lib.operations["resume-scrapejob"], {"namespace": "gyopart", "name": "site-a"}) == \
+        "kubectl -n gyopart annotate scrapejob site-a scrape.danwils.com/resume=$(date +%s) --overwrite"
+
+
+def test_annotate_verb_allows_only_its_actions(tmp_path):
+    shutil.copytree(CHART / "runbooks", tmp_path / "runbooks")
+    shutil.copytree(CHART / "operations", tmp_path / "operations")
+    p = tmp_path / "operations" / "run-scrapejob-now.yaml"
+    p.write_text(p.read_text().replace("action: run-now", "action: dry-run"))
+    lib = Library(str(tmp_path / "runbooks"), str(tmp_path / "operations"))
+    lib.refresh()
+    assert "action must be one of" in lib.errors["operations/run-scrapejob-now.yaml"]
+
+
+@pytest.mark.parametrize("which, status, passes", [
+    ("run", {"phase": "Degraded", "lastRun": {"exitCode": 1}}, True),
+    ("run", {"phase": "Healthy", "stale": True}, True),
+    ("run", {"phase": "Degraded", "currentRun": {"trigger": "scheduled", "nextAttemptAt": "x"}}, True),    # waiting retry
+    ("run", {"phase": "Suspended"}, False),                                       # that's resume
+    ("run", {"phase": "Disabled"}, False),                                        # the operator would run it anyway
+    ("run", {"phase": "Degraded", "currentRun": {"k8sJob": "site-a-1-1"}}, False),
+    ("run", {"phase": "Degraded", "lastRun": {"exitCode": 65}}, False),
+    ("run", {"phase": "Degraded", "lastRun": {"exitCode": 137}}, False),
+    ("resume", {"phase": "Suspended", "lastRun": {"exitCode": 1}}, True),
+    ("resume", {"phase": "Degraded"}, False),                                     # the operator would do nothing
+    ("resume", {"phase": "Suspended", "lastRun": {"exitCode": 65}}, False),
+    ("resume", {"phase": "Suspended", "lastRun": {"exitCode": 137}}, False),
+])
+def test_scrapejob_pre_checks(which, status, passes):
+    assert _checks(which, status)[0] is passes
+
+
+@pytest.mark.parametrize("which, status, started, passes", [
+    ("run-post", {"phase": "Degraded"}, 1, True),
+    ("run-post", {"phase": "Degraded"}, 0, False),
+    ("resume-post", {"phase": "Degraded"}, 1, True),                              # probing: no longer suspended
+    ("resume-post", {"phase": "Suspended"}, 1, False),                            # the probe failed
+    ("resume-post", {"phase": "Degraded"}, 0, False),
+])
+def test_scrapejob_post_checks(which, status, started, passes):
+    assert _checks(which, status, started)[0] is passes
+
+
+@needs_pg
+def test_executor_annotates_only_where_allowed(conn):
+    lib = Library(None, str(CHART / "operations"))
+    lib.refresh()
+    op = lib.operations["run-scrapejob-now"]
+    inc_id, _ = db.record_firing(conn, alert("s1", alertname="ScrapeJobFailing"))
+    k8s = cluster()
+    rid = db.add_op_run(conn, inc_id, op.name, op.rev, {"namespace": "gyopart-dev", "name": "site-a"}, "approve", "ready")
+    executor.step(conn, lib, k8s)
+    assert db.get_op_run(conn, rid)["status"] == "failed" and not k8s.patched
+    rid = db.add_op_run(conn, inc_id, op.name, op.rev, {"namespace": "gyopart", "name": "site-a"}, "approve", "ready")
+    executor.step(conn, lib, k8s)
+    assert db.get_op_run(conn, rid)["status"] == "settling"
+    assert k8s.patched == [(SJOB, {"metadata": {"annotations": {"scrape.danwils.com/run-now": f"incident-operator-{rid}"}}})]
 
 
 def _mail_text(e, inc):

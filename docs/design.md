@@ -704,7 +704,9 @@ After several approved runs where the post-check passed, raising it to `auto` is
    namespaces (`run.namespaces`), because the chart makes namespaced Roles from them; post-checks are read-only
    operations with an expectation, no inline `k8s:` check form; `auto` is refused at load until phase 4; operations
    and their records are a "Fixes" table on the Runbooks page rather than their own page. `rerun-backup-job`
-   (`CreateJobFrom`, `suggest`) followed the same day, for passing failures of weekly backups.
+   (`CreateJobFrom`, `suggest`) followed the same day, for passing failures of weekly backups. `run-scrapejob-now` and
+   `resume-scrapejob` (`AnnotateScrapeJob`, `approve` in the scraper runbook) followed on 2026-11-05. An incident takes
+   one fix, so several scrapers failing together need one approval each until alerts can be triaged as a group.
 4. **Auto** for operations with a record. More verbs as runbooks need them. CRDs if the formats have settled (§4.3).
 
 ## 15. Open questions

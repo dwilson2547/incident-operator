@@ -1,0 +1,11 @@
+name: scrapejob-recent-start
+description: How many Kubernetes Jobs of the ScrapeJob started in the last 10 minutes (kube-state-metrics), scheduled or manual.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  name: {from: target.name}
+run:
+  kind: promql
+  queries:
+    started: 'count(kube_job_status_start_time{namespace="{namespace}", job_name=~"{name}-[0-9]+-[0-9]+"} > time() - 600)'
+budget: {maxChars: 300}

@@ -1,0 +1,31 @@
+name: run-scrapejob-now
+description: Ask scrape-job-manager for one run of this ScrapeJob now instead of at its next slot. For a job that failed and may pass on a new run.
+mutating: true
+autonomy: suggest                 # the scraper runbook raises it to approve
+params:
+  namespace: {from: target.namespace}
+  name: {from: target.name}
+# Not Suspended (that is resume), and not Disabled, which the operator would run anyway. Not while a run is going.
+# currentRun without a k8sJob is a waiting retry, which a run-now replaces (scrape-job-manager reconcile.py).
+#
+# And the runbook's "retrying won't help" cases: a scraper that reported itself broken (65) or ran out of memory (137)
+# fails the same way until something changes. After that change, a person can still set the annotation by hand.
+pre:
+  - {op: scrapejob-status, expect: "status.phase != \"Suspended\""}
+  - {op: scrapejob-status, expect: "status.phase != \"Disabled\""}
+  - {op: scrapejob-status, expect: "status.currentRun.k8sJob == null"}
+  - {op: scrapejob-status, expect: "status.lastRun.exitCode != 65"}
+  - {op: scrapejob-status, expect: "status.lastRun.exitCode != 137"}
+run:
+  verb: AnnotateScrapeJob
+  namespaces: [gyopart, motorcycles]
+  namespace: "{namespace}"
+  name: "{name}"
+  action: run-now
+# The run started; whether it then passes is what the scrape alerts already watch. It counts Jobs, not status, because
+# a blocked run can be over before the check. A run waiting on the pool's concurrency limit past `settle` fails this.
+post:
+  settle: 180
+  checks:
+    - {op: scrapejob-recent-start, expect: "started.0.value >= 1"}
+limits: {perTarget: 1/1h, global: 10/24h}
