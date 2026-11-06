@@ -35,7 +35,8 @@ READ_KINDS = {"alert-objects", "k8s-summary", "k8s-get", "k8s-events", "k8s-logs
 TARGET_KINDS = {"Pod", "Job", "Deployment", "StatefulSet", "DaemonSet", "Node", "ScrapeJob"}
 PARAM_SOURCE = re.compile(r"^(target\.(name|namespace|kind)|alertLabel:[A-Za-z_][A-Za-z0-9_]*|result:[a-z0-9-]+\.[\w.]+)$")
 NAME = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
-VERBS = {"DeletePods", "CreateJobFrom"}            # executor.py; the set grows by code change (design §7.2)
+VERBS = {"DeletePods", "CreateJobFrom", "AnnotateScrapeJob"}   # executor.py; the set grows by code change (design §7.2)
+SCRAPEJOB_ACTIONS = ("run-now", "resume")          # the only annotations AnnotateScrapeJob may set
 AUTONOMY = ("suggest", "approve")                  # `auto` is phase 4
 # An expectation on a check's structured result: `<path> <op> <literal>`, e.g. `mount_nfs_dstate_total == 0`.
 EXPECT = re.compile(r"^\s*([\w.]+)\s*(==|!=|>=|<=|>|<)\s*(-?\d+(?:\.\d+)?|true|false|null|\"[^\"]*\")\s*$")
@@ -194,6 +195,11 @@ def _check_mutating(op: Operation, d: dict, params: set[str]) -> None:
     elif run["verb"] == "CreateJobFrom":
         if not isinstance(run.get("cronjob"), str):
             raise LoadError("CreateJobFrom needs cronjob")
+    elif run["verb"] == "AnnotateScrapeJob":
+        if not isinstance(run.get("name"), str):
+            raise LoadError("AnnotateScrapeJob needs name")
+        if run.get("action") not in SCRAPEJOB_ACTIONS:
+            raise LoadError(f"AnnotateScrapeJob action must be one of {SCRAPEJOB_ACTIONS}")
     op.autonomy = d.get("autonomy", "suggest")
     if op.autonomy not in AUTONOMY:
         raise LoadError(f"autonomy must be one of {AUTONOMY} (auto comes later)")

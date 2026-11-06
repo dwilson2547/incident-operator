@@ -17,7 +17,7 @@ import time
 from . import db
 from .evidence import K8s
 from .fixes import valid_params
-from .library import Library, Operation
+from .library import SCRAPEJOB_ACTIONS, Library, Operation
 from .ops import _fill
 
 log = logging.getLogger("incident_operator.executor")
@@ -59,12 +59,25 @@ def create_job_from(k8s: K8s, run: dict, run_id: int) -> str:
     return f"created job {ns}/{name} from cronjob/{cj_name}"
 
 
+def annotate_scrapejob(k8s: K8s, run: dict, run_id: int) -> str:
+    """What `kubectl annotate scrapejob ... --overwrite` does. scrape-job-manager acts on any value it hasn't handled."""
+    ns, name, action = run["namespace"], run["name"], run["action"]
+    if action not in SCRAPEJOB_ACTIONS:
+        raise RuntimeError(f"unknown ScrapeJob action {action}")
+    key = f"scrape.danwils.com/{action}"
+    k8s.patch(f"/apis/scrape.danwils.com/v1alpha1/namespaces/{ns}/scrapejobs/{name}",
+              {"metadata": {"annotations": {key: f"incident-operator-{run_id}"}}})
+    return f"annotated scrapejob {ns}/{name} with {key}"
+
+
 def perform(k8s: K8s, op: Operation, params: dict, run_id: int) -> str:
     run = _fill(op.run, valid_params(op, params))
     if run["verb"] == "DeletePods":
         return delete_pods(k8s, run)
     if run["verb"] == "CreateJobFrom":
         return create_job_from(k8s, run, run_id)
+    if run["verb"] == "AnnotateScrapeJob":
+        return annotate_scrapejob(k8s, run, run_id)
     raise RuntimeError(f"unknown verb {run['verb']}")
 
 

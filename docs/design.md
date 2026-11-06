@@ -396,6 +396,7 @@ Postgres and performs them with a **small fixed set of verbs**:
 | `DeletePods` | Delete pods matching namespace + selector + fieldSelector | `delete` on `pods` in the namespaces listed in its config |
 | `RolloutRestart` | Patch a Deployment/StatefulSet's restart annotation | `patch` on named workloads |
 | `CreateJobFrom` | `create job --from=cronjob/<name>` (rerun a failed backup) | `create` on `jobs` + `get` on `cronjobs`, named namespaces |
+| `AnnotateScrapeJob` | Set a ScrapeJob's `run-now` or `resume` annotation; the verb allows no others | `patch` on `scrapejobs`, named namespaces |
 | `RunJob` | Run a vetted Job template from the operation (e.g. a node-local kill script) | `create` on `jobs` in the operator namespace |
 
 The verb set grows by code change. The chart generates the executor's Role/ClusterRole from the mutating operations

@@ -261,6 +261,10 @@ rules:
   - apiGroups: [batch]
     resources: [jobs]
     verbs: [create]
+  {{- else if eq $op.run.verb "AnnotateScrapeJob" }}
+  - apiGroups: [scrape.danwils.com]
+    resources: [scrapejobs]
+    verbs: [patch]
   {{- else }}
   {{- fail (printf "operation %s: the chart doesn't know verb %s's RBAC" $op.name $op.run.verb) }}
   {{- end }}

@@ -11,6 +11,7 @@ pods/log, events, jobs, workloads and nodes). Nothing here can change anything.
 from __future__ import annotations
 
 import itertools
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -60,6 +61,15 @@ class K8s:
         import httpx
         r = httpx.post(self.base + path, json=body, timeout=15, verify=self.verify,
                        headers={"Authorization": f"Bearer {self.token}"} if self.token else {})
+        r.raise_for_status()
+        return r.json()
+
+    # Used only by the executor's AnnotateScrapeJob.
+    def patch(self, path: str, body: dict) -> dict:
+        import httpx
+        r = httpx.patch(self.base + path, content=json.dumps(body), timeout=15, verify=self.verify,
+                        headers={"Content-Type": "application/merge-patch+json",
+                                 **({"Authorization": f"Bearer {self.token}"} if self.token else {})})
         r.raise_for_status()
         return r.json()
 

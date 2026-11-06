@@ -63,6 +63,9 @@ def command(op: Operation, params: dict) -> str:
     if run["verb"] == "CreateJobFrom":
         return (f"kubectl -n {q(run['namespace'])} create job --from=cronjob/{q(run['cronjob'])} "
                 f"{q(run['cronjob'][:40])}-manual-$(date +%s)")
+    if run["verb"] == "AnnotateScrapeJob":
+        return (f"kubectl -n {q(run['namespace'])} annotate scrapejob {q(run['name'])} "
+                f"scrape.danwils.com/{q(run['action'])}=$(date +%s) --overwrite")
     return json.dumps(run)
 
 
