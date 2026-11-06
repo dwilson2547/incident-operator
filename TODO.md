@@ -9,6 +9,12 @@
   used yet; raising it would reach further back and give some of the savings back. Earlier measurements:
   `ai/gpu-scheduler/docs/remote-worker-mac.md` "Big-model replay".
 
+- [ ] **Ignore timestamps when collapsing repeated log lines** (user, 2026-11-05; do it when it bites).
+  `collapse_repeats` only matches exact repeats. That works for the scrapers, whose lines carry no timestamp, but most
+  logs start with one, so every line looks unique and nothing collapses. Compare lines with a leading timestamp
+  stripped, and keep one timestamp on the collapsed line. Sign it's needed: a timestamped service's logs filling the
+  character cap with near-identical lines.
+
 - [ ] **TowerContainerCPUSustained needs alert work and a runbook** (flagged 2026-11-02, incident #28).
   It fires for `plex` about once a day, and by the time anyone looks there's nothing to see.
   Measured 2026-10-27 → 11-02 (Prometheus `ALERTS` + `container_cpu_usage_seconds_total{job="tower-cadvisor"}`):
