@@ -29,8 +29,10 @@ period. Suspended: repeated failed runs stopped it until someone resumes it.
 Use the first that fits, then add the Suspended or Failing line.
 - Findings say the same scraper fails on other sites: say that first, name them, treat it as one problem. Never call
   for a per-site code change. Blocked (403, Cloudflare): the VPN proxy's exit IP, nordvpn-proxy-entrypoint.vpn:8118
-  (none of the primer's IPs). It changes exit every 20 minutes, so a later run gets a different IP and may pass. If
-  blocks keep coming across exits, escalate: Cloudflare may be blocking the VPN's ranges. Not blocked: the shared code; name the log line.
+  (none of the primer's IPs). It changes exit every 20 minutes. If this is one burst, say a later run gets a new exit
+  and may pass, and that nothing needs doing yet. Only if the evidence shows blocks on several exits or across runs,
+  tell the operator that Cloudflare may be blocking the VPN's ranges; the choice is then a different exit or provider,
+  and Cloudflare itself can't help. Not blocked: the shared code; name the log line.
 - A shared service at 0 available: name it and fix that; its scrapers recover once it's back.
 - Broken (65) on this site only: needs a code change for this site; name the log line. Retrying won't help.
 - Transient (75) on this site only: the site is down or slow; the operator retries it.
