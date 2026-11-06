@@ -1,5 +1,5 @@
 name: tower-container-now
-description: The Tower container's cores right now and hours since it started, and Tower's three busiest containers.
+description: The Tower container's cores right now and hours since it started, Tower's three busiest containers, and how many disks are reading fast (a parity check reads 6 to 8 at once).
 mutating: false
 params:
   name: {from: alertLabel:name}
@@ -9,4 +9,7 @@ run:
     cores_now: 'sum(rate(container_cpu_usage_seconds_total{job="tower-cadvisor", name="{name}"}[5m]))'
     hours_since_start: '(time() - max(container_start_time_seconds{job="tower-cadvisor", name="{name}"})) / 3600'
     busiest: 'topk(3, sum by (name) (rate(container_cpu_usage_seconds_total{job="tower-cadvisor", name!=""}[5m])))'
+    # Whole disks over 50 MB/s. Measured over 2026-10-27..11-05: 6 to 8 throughout the 11-01 parity check, otherwise 0
+    # apart from one 10-minute sample of 1.
+    disks_reading_fast: 'count(rate(node_disk_read_bytes_total{job="tower-node", device!~"md.*|dm-.*|loop.*"}[10m]) > 5e7) or vector(0)'
 budget: {maxChars: 800}
