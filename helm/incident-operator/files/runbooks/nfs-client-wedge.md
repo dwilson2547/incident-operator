@@ -35,6 +35,7 @@ ContainerCreating with FailedMount timeouts. Not this runbook: high load with bu
 ## Remediation
 - Stuck mount.nfs on this node, parents_are_csi_nfs_node true, only this node affected and Tower looks normal:
   propose restart-csi-nfs-node. The stuck mounts are the CSI pod's children and die with it.
+- After a restart: ask to confirm with nfs-dstate (mount_nfs_dstate_total 0) and that load is falling.
 - mount_nfs_dstate_total 0 and load normal: the condition has cleared; nothing to do.
 - Tower load also high, or several nodes affected: do not restart (operation none); escalate "check Tower's nfsd for stuck threads
   (needs root on Tower)".

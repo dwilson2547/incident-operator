@@ -1,0 +1,13 @@
+name: tower-container-cpu
+description: Cores used by the Tower container over the last 24 hours, every 30 minutes, and the same hours one day earlier - flat or bursty, new or a daily schedule.
+mutating: false
+params:
+  name: {from: alertLabel:name}
+run:
+  kind: promql-range
+  queries:
+    cores: 'sum(rate(container_cpu_usage_seconds_total{job="tower-cadvisor", name="{name}"}[30m]))'
+    cores_yesterday: 'sum(rate(container_cpu_usage_seconds_total{job="tower-cadvisor", name="{name}"}[30m] offset 1d))'
+  range: 24h
+  step: 30m
+budget: {maxChars: 2000}

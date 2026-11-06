@@ -26,9 +26,14 @@ previous container's exit code and its last log lines, not the current (often em
 - Errors naming another service (connection refused, timeout, DNS) mean the cause is that service, not this pod.
 
 ## Remediation
+- Restarts stopped long ago: history, not a live crash. Nothing to do; the alert clears by itself.
 - OOMKilled with usage rising steadily to the limit: raise the memory limit in the app's Helm values, in git
   (Argo reverts kubectl edits); if it keeps rising after that, it's a leak to fix in code.
-- A clear application error (config, missing secret, bad migration, code bug): name the fix in the repo's values or
-  code. Restarting won't help.
-- A dependency down: say which one; the pod recovers on its own once it's back.
+- OOMKilled from flat usage or a sudden spike: name what the logs show it was doing; a higher limit only helps if that
+  work really needs the memory.
+- A clear application error (config, missing secret, bad migration, code bug): name the log line and the fix in the
+  repo's values or code. Restarting won't help. If a new image started it (restarts began at a deploy), reverting that
+  image tag in git is the quick way back.
+- A dependency down: say which one; the pod recovers on its own once it's back, so fix that first.
+- Exit 0 with restarts: the command or workload type is wrong; fix the manifest.
 - Unclear from the evidence: say what to check next. Never suggest deleting the pod as a fix for a crash.

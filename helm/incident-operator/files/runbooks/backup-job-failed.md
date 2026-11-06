@@ -34,7 +34,8 @@ there is no success for a day or more. So the question is whether the next run w
 - A run that hung on the backup share: ask for tower-load.
 
 ## Remediation
-- A later attempt failing on what an earlier one left: fix the earlier attempt's cause, not the later error.
+- A later attempt failing on what an earlier one left: fix the earlier attempt's cause, not the later error. A restic
+  lock left by a killed attempt: run `restic unlock` in a one-off pod with the Job's own spec, then fix the cause.
 - OOMKilled: raise the Job's memory limit in its manifest or values in git.
 - Hung on the NFS share with Tower loaded: escalate "check Tower and the NFS client on the node"; the next run will
   hang too. Never suggest testing with a new NFS mount from a cluster node.
@@ -43,4 +44,6 @@ there is no success for a day or more. So the question is whether the next run w
   Any other cause (OOMKilled, a hang, credentials, permissions, config): operation none, since a rerun fails the
   same way.
 - Credentials, permissions or a full disk: name the secret or volume to fix. Retrying won't help.
-- The failed Job keeps its alert firing until it is deleted; say to delete it once the cause is understood.
+- Say whether the data is safe: the last success from cronjob-history, and whether this run saved its copy first.
+- The failed Job keeps its alert firing until it is deleted; once the cause is understood:
+  `kubectl -n <namespace> delete job <name>`.

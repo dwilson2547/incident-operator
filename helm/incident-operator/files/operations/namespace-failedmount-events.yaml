@@ -1,0 +1,11 @@
+name: namespace-failedmount-events
+description: FailedMount events in the target's namespace - a pod stuck in ContainerCreating on a volume or secret, with the message. They are kept about an hour.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+run:
+  kind: k8s-events
+  namespace: "{namespace}"
+  reason: FailedMount
+  limit: 10
+budget: {maxChars: 3000}

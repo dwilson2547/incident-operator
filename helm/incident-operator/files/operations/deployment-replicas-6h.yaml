@@ -1,0 +1,15 @@
+name: deployment-replicas-6h
+description: Desired, updated and available replicas of the Deployment over the last 6 hours - when it began, and whether it is flapping or steady.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  deployment: {from: target.name}
+run:
+  kind: promql-range
+  queries:
+    desired: 'max(kube_deployment_spec_replicas{namespace="{namespace}", deployment="{deployment}"})'
+    updated: 'max(kube_deployment_status_replicas_updated{namespace="{namespace}", deployment="{deployment}"})'
+    available: 'max(kube_deployment_status_replicas_available{namespace="{namespace}", deployment="{deployment}"})'
+  range: 6h
+  step: 15m
+budget: {maxChars: 1500}

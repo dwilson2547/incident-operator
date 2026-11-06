@@ -1,0 +1,16 @@
+name: deployment-pods
+description: What each pod of the Deployment is doing now - not ready, pending, waiting reason, last termination reason, restarts - and the images they run.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  deployment: {from: target.name}
+run:
+  kind: promql
+  queries:
+    images: 'count by (image) (kube_pod_container_info{namespace="{namespace}", pod=~"{deployment}-[a-z0-9]+-[a-z0-9]+"})'
+    not_ready: 'max by (pod) (kube_pod_status_ready{namespace="{namespace}", pod=~"{deployment}-[a-z0-9]+-[a-z0-9]+", condition="true"}) == 0'
+    pending: 'max by (pod) (kube_pod_status_phase{namespace="{namespace}", pod=~"{deployment}-[a-z0-9]+-[a-z0-9]+", phase="Pending"}) == 1'
+    waiting: 'max by (pod, container, reason) (kube_pod_container_status_waiting_reason{namespace="{namespace}", pod=~"{deployment}-[a-z0-9]+-[a-z0-9]+"}) > 0'
+    last_terminated: 'max by (pod, container, reason) (kube_pod_container_status_last_terminated_reason{namespace="{namespace}", pod=~"{deployment}-[a-z0-9]+-[a-z0-9]+"}) > 0'
+    restarts: 'max by (pod, container) (kube_pod_container_status_restarts_total{namespace="{namespace}", pod=~"{deployment}-[a-z0-9]+-[a-z0-9]+"}) > 0'
+budget: {maxChars: 3000}

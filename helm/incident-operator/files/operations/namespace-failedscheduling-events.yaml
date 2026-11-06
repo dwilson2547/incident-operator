@@ -1,0 +1,11 @@
+name: namespace-failedscheduling-events
+description: FailedScheduling events in the target's namespace - why a Pending pod fits no node. They are kept about an hour.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+run:
+  kind: k8s-events
+  namespace: "{namespace}"
+  reason: FailedScheduling
+  limit: 10
+budget: {maxChars: 3000}

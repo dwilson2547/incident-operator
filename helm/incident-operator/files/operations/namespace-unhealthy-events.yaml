@@ -1,0 +1,11 @@
+name: namespace-unhealthy-events
+description: Unhealthy events in the target's namespace - which readiness or liveness probe fails, and how. They are kept about an hour.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+run:
+  kind: k8s-events
+  namespace: "{namespace}"
+  reason: Unhealthy
+  limit: 10
+budget: {maxChars: 3000}

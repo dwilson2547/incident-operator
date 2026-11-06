@@ -1,0 +1,10 @@
+name: deployment-status
+description: The Deployment's replica counts (desired, updated, ready, available), its conditions with messages, and its recent events.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  deployment: {from: target.name}
+run:
+  kind: k8s-summary
+  object: {kind: Deployment, namespace: "{namespace}", name: "{deployment}"}
+budget: {maxChars: 3000}

@@ -34,7 +34,9 @@ def load(d):
 def test_shipped_files_load_cleanly():
     lib = load(CHART)
     assert lib.errors == {}
-    assert set(lib.runbooks) == {"pod-crashloop", "backup-job-failed", "nfs-client-wedge", "scraper-failures"}
+    assert set(lib.runbooks) == {"pod-crashloop", "backup-job-failed", "nfs-client-wedge", "scraper-failures",
+                                "deployment-rollout", "job-failed", "tower-container-cpu"}
+    assert not any(r.warnings for r in lib.runbooks.values())          # all under the 800-token warning
     for alert in ("ScrapeJobFailing", "ScrapeJobStale", "ScrapeJobSuspended"):
         assert lib.match({"alertname": alert, "scrape_job": "s", "exported_namespace": "g"}).name == "scraper-failures"
 

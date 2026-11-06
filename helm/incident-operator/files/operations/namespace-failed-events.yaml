@@ -1,0 +1,11 @@
+name: namespace-failed-events
+description: Failed events in the target's namespace - the message behind an image pull error or a missing secret or configmap. They are kept about an hour.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+run:
+  kind: k8s-events
+  namespace: "{namespace}"
+  reason: Failed
+  limit: 10
+budget: {maxChars: 3000}

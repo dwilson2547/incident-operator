@@ -1,0 +1,12 @@
+name: tower-container-now
+description: The Tower container's cores right now and hours since it started, and Tower's three busiest containers.
+mutating: false
+params:
+  name: {from: alertLabel:name}
+run:
+  kind: promql
+  queries:
+    cores_now: 'sum(rate(container_cpu_usage_seconds_total{job="tower-cadvisor", name="{name}"}[5m]))'
+    hours_since_start: '(time() - max(container_start_time_seconds{job="tower-cadvisor", name="{name}"})) / 3600'
+    busiest: 'topk(3, sum by (name) (rate(container_cpu_usage_seconds_total{job="tower-cadvisor", name!=""}[5m])))'
+budget: {maxChars: 800}
