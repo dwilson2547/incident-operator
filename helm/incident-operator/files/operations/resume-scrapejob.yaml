@@ -5,13 +5,11 @@ autonomy: suggest                 # the scraper runbook raises it to approve
 params:
   namespace: {from: target.namespace}
   name: {from: target.name}
-# Only a Suspended job: on any other the operator marks the annotation handled and does nothing. The exit codes are as
-# in run-scrapejob-now; a new scraper image retests a suspended job by itself, so a code fix doesn't need this.
+# Only a Suspended job: on any other the operator marks the annotation handled and does nothing. No check on the last
+# exit code, as in run-scrapejob-now. A new scraper image retests a suspended job by itself, so a code fix doesn't need this.
 pre:
   - {op: scrapejob-status, expect: "status.phase == \"Suspended\""}
   - {op: scrapejob-status, expect: "status.currentRun.k8sJob == null"}
-  - {op: scrapejob-status, expect: "status.lastRun.exitCode != 65"}
-  - {op: scrapejob-status, expect: "status.lastRun.exitCode != 137"}
 run:
   verb: AnnotateScrapeJob
   namespaces: [gyopart, motorcycles]

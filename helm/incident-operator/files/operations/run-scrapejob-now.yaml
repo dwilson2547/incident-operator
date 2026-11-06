@@ -8,14 +8,12 @@ params:
 # Not Suspended (that is resume), and not Disabled, which the operator would run anyway. Not while a run is going.
 # currentRun without a k8sJob is a waiting retry, which a run-now replaces (scrape-job-manager reconcile.py).
 #
-# And the runbook's "retrying won't help" cases: a scraper that reported itself broken (65) or ran out of memory (137)
-# fails the same way until something changes. After that change, a person can still set the annotation by hand.
+# No check on the last exit code. Blocks exit 65 like real breakage, and a run after a fix must work while lastRun still
+# shows the old failure. Telling those apart is the runbook's job and the approver's.
 pre:
   - {op: scrapejob-status, expect: "status.phase != \"Suspended\""}
   - {op: scrapejob-status, expect: "status.phase != \"Disabled\""}
   - {op: scrapejob-status, expect: "status.currentRun.k8sJob == null"}
-  - {op: scrapejob-status, expect: "status.lastRun.exitCode != 65"}
-  - {op: scrapejob-status, expect: "status.lastRun.exitCode != 137"}
 run:
   verb: AnnotateScrapeJob
   namespaces: [gyopart, motorcycles]

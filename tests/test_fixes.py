@@ -368,12 +368,10 @@ def test_annotate_verb_allows_only_its_actions(tmp_path):
     ("run", {"phase": "Suspended"}, False),                                       # that's resume
     ("run", {"phase": "Disabled"}, False),                                        # the operator would run it anyway
     ("run", {"phase": "Degraded", "currentRun": {"k8sJob": "site-a-1-1"}}, False),
-    ("run", {"phase": "Degraded", "lastRun": {"exitCode": 65}}, False),
-    ("run", {"phase": "Degraded", "lastRun": {"exitCode": 137}}, False),
+    ("run", {"phase": "Degraded", "lastRun": {"exitCode": 65}}, True),            # a block exits 65 too
     ("resume", {"phase": "Suspended", "lastRun": {"exitCode": 1}}, True),
     ("resume", {"phase": "Degraded"}, False),                                     # the operator would do nothing
-    ("resume", {"phase": "Suspended", "lastRun": {"exitCode": 65}}, False),
-    ("resume", {"phase": "Suspended", "lastRun": {"exitCode": 137}}, False),
+    ("resume", {"phase": "Suspended", "lastRun": {"exitCode": 137}}, True),       # after raising the limit
 ])
 def test_scrapejob_pre_checks(which, status, passes):
     assert _checks(which, status)[0] is passes

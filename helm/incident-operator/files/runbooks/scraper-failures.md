@@ -34,7 +34,7 @@ Use the first that fits, then add the Suspended or Failing line.
   Cloudflare may be blocking the VPN's ranges, so use another exit or provider. Cloudflare itself can't help.
   Not blocked: the shared code; name the log line.
 - A shared service at 0 available: name it and fix that; its scrapers recover once it's back.
-- Broken (65) on this site only: needs a code change for this site; name the log line. Retrying won't help.
+- Broken (65) on this site only, not blocked: needs a code change for this site; name the log line. Retrying won't help.
 - Transient (75) on this site only: the site is down or slow; the operator retries it.
 - Out of memory (137): raise the ScrapeJob's memory limit in its values.
 - Failing: one failed run, still scheduled. Never mention resuming. Say if the next run will likely fail the same way.
