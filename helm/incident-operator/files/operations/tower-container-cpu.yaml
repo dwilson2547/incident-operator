@@ -8,6 +8,6 @@ run:
   queries:
     cores: 'sum(rate(container_cpu_usage_seconds_total{job="tower-cadvisor", name="{name}"}[1h]))'
     cores_yesterday: 'sum(rate(container_cpu_usage_seconds_total{job="tower-cadvisor", name="{name}"}[1h] offset 1d))'
-  range: 24h
+  range: 23h
   step: 1h
 budget: {maxChars: 2000}
