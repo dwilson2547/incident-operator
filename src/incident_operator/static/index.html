@@ -138,7 +138,7 @@ async function refresh() {
     else renderList(await api("/api/incidents"));
     state.lastOk = new Date(); failing(null);
   } catch (e) {
-    if (m && e.message.startsWith("404")) $("#view-incident").innerHTML = `<div class="card empty">Incident ${esc(m[1])} doesn't exist. <a href="#/">All incidents</a></div>`;
+    if (m && e.message.startsWith("404")) state.incidentLive = false, failing(null), $("#view-incident").innerHTML = `<div class="card empty">Incident ${esc(m[1])} doesn't exist. <a href="#/">All incidents</a></div>`;
     else failing(e);
   }
 }
@@ -163,9 +163,12 @@ function renderList(d) {
 function renderIncident(i) {
   const ann = i.annotations || {};
   const turn = i.turns[i.turns.length - 1];   // the generic (no-runbook) answer shows its fallback model
-  // The page refreshes every 10 s: keep open/closed sections as the user left them (same incident only).
+  state.incidentLive = ["new", "triaging", "investigating", "advising"].includes(i.status)
+    || i.fixes.some(f => ["approved", "ready", "running", "settling"].includes(f.status));
+  // Re-rendering replaces every element: keep open sections and scroll positions as the user left them (same incident only).
   const view = $("#view-incident"), keep = view.dataset.id === String(i.id);
   const was = keep ? [...view.querySelectorAll("details")].map(d => d.open) : null;
+  const scrolled = keep ? [...view.querySelectorAll("pre, .scroll")].map(e => [e.scrollTop, e.scrollLeft]) : null;
   view.dataset.id = i.id;
   view.innerHTML = `
     <p><a href="#/">← All incidents</a></p>
@@ -209,6 +212,7 @@ function renderIncident(i) {
       </div>
     </div>`;
   if (was) view.querySelectorAll("details").forEach((d, k) => { if (k < was.length) d.open = was[k]; });
+  if (scrolled) view.querySelectorAll("pre, .scroll").forEach((e, k) => { if (k < scrolled.length) [e.scrollTop, e.scrollLeft] = scrolled[k]; });
 }
 
 function fixHtml(f) {
@@ -296,7 +300,14 @@ function renderRunbooks(d) {
 
 window.addEventListener("hashchange", refresh);
 refresh();
-setInterval(() => { if (!document.hidden) refresh(); }, 10000);
+// Only what can change on its own: the list, and an incident with triage or a fix under way. After a failed load, keep
+// retrying wherever we are, as the banner promises.
+function shouldPoll() {
+  if (!$("#banner").classList.contains("hidden")) return true;
+  if (location.hash.startsWith("#/runbooks")) return false;
+  return /^#\/incident\/\d+/.test(location.hash) ? state.incidentLive : true;
+}
+setInterval(() => { if (!document.hidden && shouldPoll()) refresh(); }, 10000);
 </script>
 </body>
 </html>
