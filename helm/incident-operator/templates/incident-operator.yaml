@@ -52,7 +52,7 @@ rules:
     resources: [pods, pods/log, events, nodes]
     verbs: [get, list]
   - apiGroups: [batch]
-    resources: [jobs]
+    resources: [jobs, cronjobs]           # cronjobs: operation cronjob-status
     verbs: [get, list]
   - apiGroups: [apps]
     resources: [deployments, statefulsets, daemonsets]
