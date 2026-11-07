@@ -156,8 +156,29 @@ ALTER TABLE op_runs ADD CONSTRAINT op_runs_status_check
 """
 
 
-def connect(url: str, autocommit: bool = True) -> psycopg.Connection:
-    return psycopg.connect(url, row_factory=dict_row, autocommit=autocommit)
+class Reconnecting:
+    """A connection for the long-running loops that reopens itself after the server dropped it.
+
+    psycopg marks a connection closed once the server is gone (a postgres restart) and never reopens it, so a loop
+    holding one fails every pass from then on. This opens a new one on the next use instead. The pass that hit the
+    drop still fails; the loops already log that and retry.
+    """
+
+    def __init__(self, url: str, autocommit: bool = True):
+        self._url, self._autocommit = url, autocommit
+        self._conn = self._open()
+
+    def _open(self) -> psycopg.Connection:
+        return psycopg.connect(self._url, row_factory=dict_row, autocommit=self._autocommit)
+
+    def __getattr__(self, name):
+        if self._conn.closed:
+            self._conn = self._open()
+        return getattr(self._conn, name)
+
+
+def connect(url: str, autocommit: bool = True) -> Reconnecting:
+    return Reconnecting(url, autocommit)
 
 
 def migrate(conn: psycopg.Connection) -> None:
