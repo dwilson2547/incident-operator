@@ -1,5 +1,6 @@
 """Intake, the triage engine and the email, with a fake gpu-scheduler, a fake Kubernetes and a real local SMTP server."""
 import uuid
+from unittest.mock import ANY
 
 import pytest
 from conftest import URL, alert, needs_pg
@@ -169,6 +170,22 @@ def test_webhook_and_ui_apps(conn):
         assert ui.get("/api/incidents/99999").status_code == 404
         assert "<title>Incidents</title>" in ui.get("/").text
         assert ui.post("/alertmanager", json=payload).status_code in (404, 405)    # not on the UI's port
+
+
+@needs_pg
+def test_needs_runbook_leaves_out_incidents_a_runbook_now_matches(conn, tmp_path):
+    from incident_operator.library import Library
+    (tmp_path / "runbooks").mkdir()
+    (tmp_path / "runbooks" / "crash-in-n.md").write_text(       # written after both incidents fired
+        "---\nname: crash-in-n\ndescription: d\nmatch: {alertname: KubePodCrashLooping, namespace: n}\n---\n\nbody\n")
+    lib = Library(str(tmp_path / "runbooks"), None)
+    lib.refresh()
+    assert "crash-in-n" in lib.runbooks, lib.errors
+    with TestClient(create_webhook_app(URL)) as wh, TestClient(create_ui_app(URL, lib)) as ui:
+        wh.post("/alertmanager", json={"alerts": [alert("a", namespace="n", pod="p"), alert("b", namespace="m")]})
+        # the runbook matches on namespace too, so only the incident in n is covered, not the alertname as a whole
+        assert ui.get("/api/incidents").json()["needs_runbook"] == [
+            {"alertname": "KubePodCrashLooping", "incidents": 1, "open": 1, "last_seen": ANY}]
 
 
 # -- brakes: repeats and the hourly cap -----------------------------------------------------------------------------

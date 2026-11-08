@@ -197,7 +197,8 @@ def create_ui_app(database_url: str, library=None, env=None) -> FastAPI:
 
     @app.get("/api/incidents")
     def incidents(c=Depends(_conn)):
-        return {"incidents": db.list_incidents(c), "needs_runbook": db.needs_runbook(c)}
+        covered = (lambda labels: library.match(labels) is not None) if library else None
+        return {"incidents": db.list_incidents(c), "needs_runbook": db.needs_runbook(c, covered)}
 
     @app.get("/api/incidents/{incident_id}")
     def incident(incident_id: int, c=Depends(_conn)):

@@ -595,12 +595,21 @@ def runbook_usage(conn: psycopg.Connection) -> list[dict]:
                         " WHERE runbook IS NOT NULL GROUP BY runbook").fetchall()
 
 
-def needs_runbook(conn: psycopg.Connection) -> list[dict]:
-    """Alertnames that have fired with no runbook: the to-do list for writing runbooks (design §8.1)."""
-    return conn.execute(
-        """
-        SELECT alertname, count(*) AS incidents, max(first_seen) AS last_seen,
-               count(*) FILTER (WHERE alert_resolved_at IS NULL) AS open
-        FROM incidents WHERE runbook IS NULL GROUP BY alertname ORDER BY incidents DESC, last_seen DESC
-        """
-    ).fetchall()
+def needs_runbook(conn: psycopg.Connection, covered=None) -> list[dict]:
+    """Alertnames that have fired with no runbook: the to-do list for writing runbooks (design §8.1).
+
+    `covered(labels)` says whether a runbook matches an incident now. Those are left out: a runbook written after an
+    incident fired covers the next one, so the alert is no longer on the to-do list. Checked per incident, because a
+    runbook can match on labels other than the alertname."""
+    out: dict[str, dict] = {}
+    for r in conn.execute("SELECT alertname, labels, first_seen, alert_resolved_at IS NULL AS open FROM incidents"
+                          " WHERE runbook IS NULL").fetchall():
+        if covered is not None and covered(r["labels"] or {}):
+            continue
+        a = out.setdefault(r["alertname"], {"alertname": r["alertname"], "incidents": 0, "last_seen": r["first_seen"],
+                                            "open": 0})
+        a["incidents"] += 1
+        a["open"] += r["open"]
+        a["last_seen"] = max(a["last_seen"], r["first_seen"])
+    rows = sorted(out.values(), key=lambda a: a["last_seen"], reverse=True)
+    return sorted(rows, key=lambda a: a["incidents"], reverse=True)
