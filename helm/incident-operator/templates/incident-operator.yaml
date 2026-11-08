@@ -281,6 +281,55 @@ subjects:
 {{- end }}
 {{- end }}
 {{- end }}
+{{- /* A Role can't limit a pod delete by label (pod names change on every restart), so DeletePods would let the
+     executor delete any pod in its namespaces. This policy refuses the executor's pod deletes unless the pod is in
+     one of a DeletePods operation's namespaces and carries all of that operation's selector labels. */}}
+{{- /* namespace -> [selector, ...]: CEL wants one value type per map, so no {ns, labels} records. */}}
+{{- $podTargets := dict }}
+{{- range $path, $_ := .Files.Glob "files/operations/*.yaml" }}
+{{- $op := $.Files.Get $path | fromYaml }}
+{{- if and $op.mutating (eq $op.run.verb "DeletePods") }}
+{{- range $ns := $op.run.namespaces }}
+{{- $_ := set $podTargets $ns (append (get $podTargets $ns | default list) $op.run.selector) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $podTargets }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: incident-operator-executor-pod-deletes
+  labels: {{- toYaml $labels | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - {apiGroups: [""], apiVersions: [v1], resources: [pods], operations: [DELETE]}
+  matchConditions:
+    - name: executor
+      expression: request.userInfo.username == 'system:serviceaccount:{{ .Release.Namespace }}:incident-operator-executor'
+  variables:
+    - name: targets
+      expression: '{{ toJson $podTargets }}'
+    - name: labels
+      expression: 'has(oldObject.metadata.labels) ? oldObject.metadata.labels : {}'
+  validations:
+    - expression: >-
+        oldObject.metadata.namespace in variables.targets &&
+        variables.targets[oldObject.metadata.namespace].exists(s,
+        s.all(k, k in variables.labels && variables.labels[k] == s[k]))
+      message: the executor may only delete pods a DeletePods operation selects
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: incident-operator-executor-pod-deletes
+  labels: {{- toYaml $labels | nindent 4 }}
+spec:
+  policyName: incident-operator-executor-pod-deletes
+  validationActions: [Deny]
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
