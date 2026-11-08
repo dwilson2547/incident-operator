@@ -35,8 +35,10 @@ log = logging.getLogger("incident_operator.app")
 def _pool_app(database_url: str, title: str) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # check: test each connection on checkout and replace it if postgres has dropped it (a restart, a terminated
+        # session). Without it every pooled connection answers one request with a 500 before the pool discards it.
         app.state.pool = ConnectionPool(database_url, kwargs={"row_factory": dict_row, "autocommit": True},
-                                        open=True, max_size=4)
+                                        open=True, max_size=4, check=ConnectionPool.check_connection)
         yield
         app.state.pool.close()
     app = FastAPI(title=title, version=__version__, lifespan=lifespan)
