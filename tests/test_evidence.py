@@ -117,6 +117,16 @@ def test_whole_set_stays_within_the_budget():
     assert any(i.truncated for i in items)
 
 
+@pytest.mark.parametrize("label,plural,kind", [("deployment", "deployments", "Deployment"),
+                                               ("statefulset", "statefulsets", "StatefulSet"),
+                                               ("daemonset", "daemonsets", "DaemonSet")])
+def test_workload_events_are_asked_for_by_the_object_kind(label, plural, kind):
+    k = FakeK8s({f"/apis/apps/v1/namespaces/a/{plural}/w": {"status": {}}, "/api/v1/namespaces/a/events": {"items": []}})
+    collect(k, {"namespace": "a", label: "w"})
+    assert k.calls[-1] == ("/api/v1/namespaces/a/events",
+                           {"fieldSelector": f"involvedObject.name=w,involvedObject.kind={kind}"})
+
+
 def test_nothing_to_collect():
     assert collect(FakeK8s({}), {"alertname": "Watchdog"}) == []
     assert "no evidence" in render([])

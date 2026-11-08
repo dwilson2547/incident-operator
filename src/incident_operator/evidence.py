@@ -237,7 +237,10 @@ def _workload(k8s: K8s, ns: str, kind: str, plural: str, api: str, name: str) ->
     for c in st.get("conditions", []):
         lines.append(f"condition {c['type']}={c['status']} {c.get('reason', '')}: {c.get('message', '')}".rstrip(": "))
     return [Item(kind, f"{kind} {ns}/{name}", _cap("\n".join(lines))[0]),
-            _events(k8s, ns, kind.capitalize() if kind != "statefulset" else "StatefulSet", name)]
+            _events(k8s, ns, WORKLOAD_KINDS[kind], name)]
+
+
+WORKLOAD_KINDS = {"deployment": "Deployment", "statefulset": "StatefulSet", "daemonset": "DaemonSet"}  # event kinds
 
 
 def _node(k8s: K8s, name: str) -> list[Item]:
