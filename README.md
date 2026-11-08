@@ -73,6 +73,17 @@ the generic one below (design §6):
 | `backup-job-failed` | `PostgresBackupJobFailed`, `OffsiteBackupJobFailed`, `SecretsBackupJobFailed` | the Job |
 | `nfs-client-wedge` | `NodeLoadHighCPUIdle` (new, cluster-config) | the node |
 | `scraper-failures` | `ScrapeJobFailing`, `ScrapeJobStale`, `ScrapeJobSuspended` | the ScrapeJob |
+| `deployment-rollout` | `KubeDeploymentRolloutStuck`, `KubeDeploymentReplicasMismatch` | the Deployment |
+| `statefulset-rollout` | `KubeStatefulSetReplicasMismatch` | the StatefulSet |
+| `daemonset-rollout` | `KubeDaemonSetRolloutStuck` | the DaemonSet |
+| `job-failed` | `KubeJobFailed` | the Job |
+| `node-not-ready` | `KubeNodeNotReady`, `KubeNodeUnreachable`, `KubeNodeReadinessFlapping` | the node |
+| `node-disk-filling` | `NodeFilesystemSpaceFillingUp`, `NodeFilesystemAlmostOutOfSpace` | the node |
+| `pvc-filling` | `KubePersistentVolumeFillingUp` | none (the claim's labels) |
+| `target-down` | `TargetDown` | none (the scrape job's label) |
+| `tower-container-cpu` | `TowerContainerCPUSustained` | none (Tower isn't a cluster node) |
+
+The six added on 2026-11-08 (statefulset, daemonset, node, disk, PVC, target) only read: none offers a fix.
 
 Operation kinds: `k8s-summary` (pod/Job/workload/node status, events, logs), `k8s-get` (fields of any object, e.g. a
 ScrapeJob), `k8s-events` (by reason, node or object), `k8s-logs`, `promql`, `promql-range` (downsampled),
@@ -122,7 +133,7 @@ never proposes or runs a fix.
      before its turn is `skipped`, so a storm doesn't become hours of late emails.
 5. **Email**, one per incident, with the answer, which model and machine answered, the evidence list and a link.
 6. **Page** at http://incident-operator.cluster.local (LAN): incidents, each one's answer, evidence and exact prompt,
-   and "needs a runbook": alerts that fired with no runbook (all of them, in phase 1).
+   and "needs a runbook": alerts that fired with no runbook and that no runbook matches now.
 
 Checked end to end on 2026-11-01 against the real cluster and gpu-scheduler: two real failed Jobs (an OOMKilled
 `rclone` backup, a parts-direct scraper that timed out) were triaged in 25 s by `qwen35-9b` on the 3080; both

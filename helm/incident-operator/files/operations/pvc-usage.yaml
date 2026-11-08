@@ -1,0 +1,15 @@
+name: pvc-usage
+description: The volume's free space and inodes as fractions, its storage class, the pods mounting it, and the lowest free fraction per storage class (volumes on one NFS share all report the share's free space).
+mutating: false
+params:
+  namespace: {from: 'alertLabel:namespace'}
+  pvc: {from: 'alertLabel:persistentvolumeclaim'}
+run:
+  kind: promql
+  queries:
+    free_fraction: 'min(kubelet_volume_stats_available_bytes{job="kubelet", namespace="{namespace}", persistentvolumeclaim="{pvc}"} / kubelet_volume_stats_capacity_bytes{job="kubelet", namespace="{namespace}", persistentvolumeclaim="{pvc}"})'
+    inodes_free_fraction: 'min(kubelet_volume_stats_inodes_free{job="kubelet", namespace="{namespace}", persistentvolumeclaim="{pvc}"} / kubelet_volume_stats_inodes{job="kubelet", namespace="{namespace}", persistentvolumeclaim="{pvc}"})'
+    storage_class: 'max by (storageclass, volumename) (kube_persistentvolumeclaim_info{namespace="{namespace}", persistentvolumeclaim="{pvc}"})'
+    mounted_by: 'max by (pod) (kube_pod_spec_volumes_persistentvolumeclaims_info{namespace="{namespace}", persistentvolumeclaim="{pvc}"})'
+    free_fraction_by_storage_class: 'min by (storageclass) (min by (namespace, persistentvolumeclaim) (kubelet_volume_stats_available_bytes{job="kubelet"} / kubelet_volume_stats_capacity_bytes{job="kubelet"}) * on (namespace, persistentvolumeclaim) group_left (storageclass) max by (namespace, persistentvolumeclaim, storageclass) (kube_persistentvolumeclaim_info))'
+budget: {maxChars: 1500}

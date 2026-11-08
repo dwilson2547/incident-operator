@@ -1,0 +1,13 @@
+name: target-down-instances
+description: Which of the scrape job's targets are down now (instance and pod), how many it has in all, how long the down ones' last scrapes took, and whether the pods behind them are ready.
+mutating: false
+params:
+  job: {from: 'alertLabel:job'}
+run:
+  kind: promql
+  queries:
+    down: 'max by (instance, namespace, pod) (up{job="{job}"} == 0)'
+    targets: 'count(up{job="{job}"})'
+    down_scrape_seconds: 'max by (instance) (scrape_duration_seconds{job="{job}"}) and on (instance) (up{job="{job}"} == 0)'
+    pod_ready: 'max by (namespace, pod) (kube_pod_status_ready{condition="true"}) and on (namespace, pod) up{job="{job}"}'
+budget: {maxChars: 2000}

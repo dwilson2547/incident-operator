@@ -1,0 +1,13 @@
+name: target-up-6h
+description: Targets up and targets in all for the scrape job over the last 6 hours - when it began, and whether it is flapping or steady.
+mutating: false
+params:
+  job: {from: 'alertLabel:job'}
+run:
+  kind: promql-range
+  queries:
+    up: 'sum(up{job="{job}"})'
+    targets: 'count(up{job="{job}"})'
+  range: 6h
+  step: 15m
+budget: {maxChars: 1200}

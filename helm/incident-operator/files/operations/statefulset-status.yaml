@@ -1,0 +1,10 @@
+name: statefulset-status
+description: The StatefulSet's status counts, its conditions with messages, and its recent events.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  statefulset: {from: target.name}
+run:
+  kind: k8s-summary
+  object: {kind: StatefulSet, namespace: "{namespace}", name: "{statefulset}"}
+budget: {maxChars: 3000}

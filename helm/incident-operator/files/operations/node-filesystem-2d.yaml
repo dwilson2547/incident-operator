@@ -1,0 +1,12 @@
+name: node-filesystem-2d
+description: Free fraction of each real filesystem on the alert's node over the last 2 days - a steady fill, a sudden jump, or space coming back.
+mutating: false
+params:
+  instance: {from: 'alertLabel:instance'}
+run:
+  kind: promql-range
+  queries:
+    free_fraction: 'max by (mountpoint) (node_filesystem_avail_bytes{job="node-exporter", instance="{instance}", fstype!~"tmpfs|ramfs|overlay|squashfs|nsfs"} / node_filesystem_size_bytes{job="node-exporter", instance="{instance}", fstype!~"tmpfs|ramfs|overlay|squashfs|nsfs"})'
+  range: 2d
+  step: 3h
+budget: {maxChars: 1500}

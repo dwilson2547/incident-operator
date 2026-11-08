@@ -1,0 +1,10 @@
+name: daemonset-status
+description: The DaemonSet's status counts, its conditions with messages, and its recent events.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  daemonset: {from: target.name}
+run:
+  kind: k8s-summary
+  object: {kind: DaemonSet, namespace: "{namespace}", name: "{daemonset}"}
+budget: {maxChars: 3000}

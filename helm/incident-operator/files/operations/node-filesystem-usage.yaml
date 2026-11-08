@@ -1,0 +1,12 @@
+name: node-filesystem-usage
+description: Every real filesystem on the alert's node now - free fraction, free GiB, and free GiB predicted in 24 hours from the last 6 hours' trend.
+mutating: false
+params:
+  instance: {from: 'alertLabel:instance'}
+run:
+  kind: promql
+  queries:
+    free_fraction: 'max by (mountpoint) (node_filesystem_avail_bytes{job="node-exporter", instance="{instance}", fstype!~"tmpfs|ramfs|overlay|squashfs|nsfs"} / node_filesystem_size_bytes{job="node-exporter", instance="{instance}", fstype!~"tmpfs|ramfs|overlay|squashfs|nsfs"})'
+    free_gib: 'max by (mountpoint) (node_filesystem_avail_bytes{job="node-exporter", instance="{instance}", fstype!~"tmpfs|ramfs|overlay|squashfs|nsfs"}) / 2^30'
+    free_gib_in_24h: 'max by (mountpoint) (predict_linear(node_filesystem_avail_bytes{job="node-exporter", instance="{instance}", fstype!~"tmpfs|ramfs|overlay|squashfs|nsfs"}[6h], 86400)) / 2^30'
+budget: {maxChars: 1500}

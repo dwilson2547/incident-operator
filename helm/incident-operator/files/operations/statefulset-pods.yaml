@@ -1,0 +1,18 @@
+name: statefulset-pods
+description: What each pod of the StatefulSet is doing now - not ready, pending, waiting reason, last termination reason, restarts - the images they run, and its current and update revisions (two means a rollout is under way).
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  statefulset: {from: target.name}
+run:
+  kind: promql
+  queries:
+    images: 'count by (image) (kube_pod_container_info{namespace="{namespace}"} and on (pod) kube_pod_owner{namespace="{namespace}", owner_kind="StatefulSet", owner_name="{statefulset}"})'
+    not_ready: '(max by (pod) (kube_pod_status_ready{namespace="{namespace}", condition="true"}) == 0) and on (pod) kube_pod_owner{namespace="{namespace}", owner_kind="StatefulSet", owner_name="{statefulset}"}'
+    pending: '(max by (pod) (kube_pod_status_phase{namespace="{namespace}", phase="Pending"}) == 1) and on (pod) kube_pod_owner{namespace="{namespace}", owner_kind="StatefulSet", owner_name="{statefulset}"}'
+    waiting: '(max by (pod, container, reason) (kube_pod_container_status_waiting_reason{namespace="{namespace}"}) > 0) and on (pod) kube_pod_owner{namespace="{namespace}", owner_kind="StatefulSet", owner_name="{statefulset}"}'
+    last_terminated: '(max by (pod, container, reason) (kube_pod_container_status_last_terminated_reason{namespace="{namespace}"}) > 0) and on (pod) kube_pod_owner{namespace="{namespace}", owner_kind="StatefulSet", owner_name="{statefulset}"}'
+    restarts: '(max by (pod, container) (kube_pod_container_status_restarts_total{namespace="{namespace}"}) > 0) and on (pod) kube_pod_owner{namespace="{namespace}", owner_kind="StatefulSet", owner_name="{statefulset}"}'
+    current_revision: 'max by (revision) (kube_statefulset_status_current_revision{namespace="{namespace}", statefulset="{statefulset}"})'
+    update_revision: 'max by (revision) (kube_statefulset_status_update_revision{namespace="{namespace}", statefulset="{statefulset}"})'
+budget: {maxChars: 3000}

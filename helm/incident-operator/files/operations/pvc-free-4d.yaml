@@ -1,0 +1,13 @@
+name: pvc-free-4d
+description: The volume's free fraction over the last 4 days - a steady fill, a sudden jump, or space coming back.
+mutating: false
+params:
+  namespace: {from: 'alertLabel:namespace'}
+  pvc: {from: 'alertLabel:persistentvolumeclaim'}
+run:
+  kind: promql-range
+  queries:
+    free_fraction: 'min(kubelet_volume_stats_available_bytes{job="kubelet", namespace="{namespace}", persistentvolumeclaim="{pvc}"} / kubelet_volume_stats_capacity_bytes{job="kubelet", namespace="{namespace}", persistentvolumeclaim="{pvc}"})'
+  range: 4d
+  step: 6h
+budget: {maxChars: 1000}

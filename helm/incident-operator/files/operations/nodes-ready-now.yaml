@@ -1,0 +1,9 @@
+name: nodes-ready-now
+description: Ready and cordoned on every cluster node right now (is this node the only one affected).
+mutating: false
+run:
+  kind: promql
+  queries:
+    ready: 'max by (node) (kube_node_status_condition{condition="Ready", status="true"})'
+    cordoned: 'max by (node) (kube_node_spec_unschedulable) > 0'
+budget: {maxChars: 800}

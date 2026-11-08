@@ -1,0 +1,12 @@
+name: node-pods-not-ready
+description: Pods on the node that should be running but aren't ready, how many pods are on it, and the namespaces with the most - what the node being down takes out.
+mutating: false
+params:
+  node: {from: target.name}
+run:
+  kind: promql
+  queries:
+    not_ready: '(max by (namespace, pod) (kube_pod_status_ready{condition="true"}) == 0) and on (namespace, pod) kube_pod_info{node="{node}"} and on (namespace, pod) (kube_pod_status_phase{phase=~"Running|Pending"} == 1)'
+    pods: 'count(kube_pod_info{node="{node}"})'
+    top_namespaces: 'topk(8, count by (namespace) (kube_pod_info{node="{node}"}))'
+budget: {maxChars: 2500}

@@ -1,0 +1,15 @@
+name: node-ready-6h
+description: The node's Ready condition, cordon, node-exporter scrape and hours since boot over the last 6 hours - when it went NotReady, whether it is flapping, and whether it rebooted.
+mutating: false
+params:
+  node: {from: target.name}
+run:
+  kind: promql-range
+  queries:
+    ready: 'max(kube_node_status_condition{node="{node}", condition="Ready", status="true"})'
+    cordoned: 'max(kube_node_spec_unschedulable{node="{node}"})'
+    node_exporter_up: 'max(label_replace(up{job="node-exporter"}, "internal_ip", "$1", "instance", "(.*):[0-9]+") * on (internal_ip) group_left kube_node_info{node="{node}"})'
+    hours_since_boot: 'max((time() - node_boot_time_seconds{job="node-exporter"}) * on (instance) group_left node_uname_info{job="node-exporter", nodename="{node}"}) / 3600'
+  range: 6h
+  step: 15m
+budget: {maxChars: 2000}

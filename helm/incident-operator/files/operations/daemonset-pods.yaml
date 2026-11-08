@@ -1,0 +1,15 @@
+name: daemonset-pods
+description: The DaemonSet's pods that aren't ready or are waiting, with the node each is on, their images, and which cluster nodes are NotReady (a pod on a down node can't become ready).
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  daemonset: {from: target.name}
+run:
+  kind: promql
+  queries:
+    images: 'count by (image) (kube_pod_container_info{namespace="{namespace}"} and on (pod) kube_pod_owner{namespace="{namespace}", owner_kind="DaemonSet", owner_name="{daemonset}"})'
+    not_ready: '(max by (pod, node) (kube_pod_info{namespace="{namespace}"}) unless on (pod) (kube_pod_status_ready{namespace="{namespace}", condition="true"} == 1)) and on (pod) kube_pod_owner{namespace="{namespace}", owner_kind="DaemonSet", owner_name="{daemonset}"}'
+    waiting: '(max by (pod, container, reason) (kube_pod_container_status_waiting_reason{namespace="{namespace}"}) > 0) and on (pod) kube_pod_owner{namespace="{namespace}", owner_kind="DaemonSet", owner_name="{daemonset}"}'
+    last_terminated: '(max by (pod, container, reason) (kube_pod_container_status_last_terminated_reason{namespace="{namespace}"}) > 0) and on (pod) kube_pod_owner{namespace="{namespace}", owner_kind="DaemonSet", owner_name="{daemonset}"}'
+    nodes_not_ready: 'max by (node) (kube_node_status_condition{condition="Ready", status="true"}) == 0'
+budget: {maxChars: 3000}

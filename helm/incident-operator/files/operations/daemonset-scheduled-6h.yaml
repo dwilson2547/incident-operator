@@ -1,0 +1,17 @@
+name: daemonset-scheduled-6h
+description: Desired, current, updated, ready and misscheduled pods of the DaemonSet over the last 6 hours - when it began, and whether it is flapping or steady.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  daemonset: {from: target.name}
+run:
+  kind: promql-range
+  queries:
+    desired: 'max(kube_daemonset_status_desired_number_scheduled{namespace="{namespace}", daemonset="{daemonset}"})'
+    current: 'max(kube_daemonset_status_current_number_scheduled{namespace="{namespace}", daemonset="{daemonset}"})'
+    updated: 'max(kube_daemonset_status_updated_number_scheduled{namespace="{namespace}", daemonset="{daemonset}"})'
+    ready: 'max(kube_daemonset_status_number_ready{namespace="{namespace}", daemonset="{daemonset}"})'
+    misscheduled: 'max(kube_daemonset_status_number_misscheduled{namespace="{namespace}", daemonset="{daemonset}"})'
+  range: 6h
+  step: 15m
+budget: {maxChars: 1500}

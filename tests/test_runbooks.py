@@ -35,10 +35,18 @@ def test_shipped_files_load_cleanly():
     lib = load(CHART)
     assert lib.errors == {}
     assert set(lib.runbooks) == {"pod-crashloop", "backup-job-failed", "nfs-client-wedge", "scraper-failures",
-                                "deployment-rollout", "job-failed", "tower-container-cpu"}
+                                "deployment-rollout", "job-failed", "tower-container-cpu", "node-not-ready", "pvc-filling",
+                                "node-disk-filling", "target-down", "statefulset-rollout", "daemonset-rollout"}
     assert not any(r.warnings for r in lib.runbooks.values())          # all under the 800-token warning
     for alert in ("ScrapeJobFailing", "ScrapeJobStale", "ScrapeJobSuspended"):
         assert lib.match({"alertname": alert, "scrape_job": "s", "exported_namespace": "g"}).name == "scraper-failures"
+    for alert, runbook in (("KubeNodeNotReady", "node-not-ready"), ("KubeNodeUnreachable", "node-not-ready"),
+                           ("KubeNodeReadinessFlapping", "node-not-ready"), ("KubePersistentVolumeFillingUp", "pvc-filling"),
+                           ("NodeFilesystemSpaceFillingUp", "node-disk-filling"),
+                           ("NodeFilesystemAlmostOutOfSpace", "node-disk-filling"), ("TargetDown", "target-down"),
+                           ("KubeStatefulSetReplicasMismatch", "statefulset-rollout"),
+                           ("KubeDaemonSetRolloutStuck", "daemonset-rollout")):
+        assert lib.match({"alertname": alert}).name == runbook
 
 
 def test_matching_and_priority(lib_dirs):
@@ -46,7 +54,7 @@ def test_matching_and_priority(lib_dirs):
         "---\nname: any-crash\ndescription: x\nmatch: {alertname: '~Kube.*'}\npriority: 1\n---\nbody\n")
     lib = load(lib_dirs)
     assert lib.match({"alertname": "KubePodCrashLooping", "pod": "p"}).name == "pod-crashloop"   # priority 10 wins
-    assert lib.match({"alertname": "KubeNodeNotReady"}).name == "any-crash"
+    assert lib.match({"alertname": "KubeCPUOvercommit"}).name == "any-crash"
     assert lib.match({"alertname": "OffsiteBackupJobFailed"}).name == "backup-job-failed"       # list match
     assert lib.match({"alertname": "Watchdog"}) is None
 
@@ -354,7 +362,7 @@ def test_alert_without_runbook_still_gets_phase_1_triage(conn, tmp_path):
     from test_triage import FakeGpu
     gpu = FakeGpu()
     e = engine(conn, gpu, tmp_path)
-    inc_id, _ = db.record_firing(conn, alert(alertname="TargetDown"))
+    inc_id, _ = db.record_firing(conn, alert(alertname="NodeClockNotSynchronising"))
     e.step()
     assert db.get_incident(conn, inc_id)["status"] == "triaging" and db.get_incident(conn, inc_id)["runbook"] is None
 

@@ -1,0 +1,15 @@
+name: statefulset-replicas-6h
+description: Desired, ready and updated replicas of the StatefulSet over the last 6 hours - when it began, and whether it is flapping or steady.
+mutating: false
+params:
+  namespace: {from: target.namespace}
+  statefulset: {from: target.name}
+run:
+  kind: promql-range
+  queries:
+    desired: 'max(kube_statefulset_replicas{namespace="{namespace}", statefulset="{statefulset}"})'
+    ready: 'max(kube_statefulset_status_replicas_ready{namespace="{namespace}", statefulset="{statefulset}"})'
+    updated: 'max(kube_statefulset_status_replicas_updated{namespace="{namespace}", statefulset="{statefulset}"})'
+  range: 6h
+  step: 15m
+budget: {maxChars: 1500}
