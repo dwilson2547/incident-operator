@@ -23,7 +23,6 @@ passes fresh pre-checks like any other.
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass
@@ -306,7 +305,7 @@ class Engine:
     def _store(self, incident_id: int, results: list[Result], trigger: str, round: int | None = None) -> None:
         for r in results:
             db.add_evidence(self.conn, incident_id, r.operation, r.source, r.text, r.truncated, r.error,
-                            trigger=trigger, operation=r.operation, round=round, data=_jsonable(r.data))
+                            trigger=trigger, operation=r.operation, round=round, data=r.data)
 
     def _start_runbook(self, inc: dict, rb) -> bool:
         try:
@@ -453,11 +452,3 @@ class Engine:
             except Exception:
                 log.exception("triage pass failed")
                 time.sleep(interval)
-
-
-def _jsonable(v):
-    try:
-        json.dumps(v)
-        return v
-    except (TypeError, ValueError):
-        return None

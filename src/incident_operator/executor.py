@@ -17,7 +17,7 @@ from . import db
 from .fixes import valid_params
 from .k8s import K8s
 from .library import SCRAPEJOB_ACTIONS, Library, Operation
-from .ops import _fill
+from .ops import fill
 from .settings import Env
 
 log = logging.getLogger("incident_operator.executor")
@@ -72,7 +72,7 @@ def annotate_scrapejob(k8s: K8s, run: dict, run_id: int) -> str:
 
 
 def perform(k8s: K8s, op: Operation, params: dict, run_id: int) -> str:
-    run = _fill(op.run, valid_params(op, params))
+    run = fill(op.run, valid_params(op, params))
     if run["verb"] == "DeletePods":
         return delete_pods(k8s, run)
     if run["verb"] == "CreateJobFrom":

@@ -21,9 +21,10 @@ any of these: the test suite (with a test Postgres, see README: Develop) must pa
 
 ## 3. Private names used across modules
 
-- [ ] `ops` calls `evidence._pod`, `_job`, `_node`, `_workload`: make them public.
-- [ ] `fixes` and `executor` import `ops._fill`: make it public.
-- [ ] `fixes` imports `triage._jsonable` inside a function: move it somewhere both can import at the top.
+- [x] `ops` calls `evidence._pod`, `_job`, `_node`, `_workload`: now `evidence.for_pod` etc., with docstrings.
+- [x] `fixes` and `executor` import `ops._fill`: now `ops.fill`.
+- [x] `fixes` imports `triage._jsonable` inside a function: `db.add_evidence` now decides what it can store as JSON,
+  so neither caller needs it.
 
 ## 4. Duplication
 

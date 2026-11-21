@@ -40,18 +40,18 @@ def collect(k8s: K8s, labels: dict[str, str]) -> list[Item]:
     ns = labels.get("namespace") or labels.get("exported_namespace")
     steps: list[Callable[[], list[Item]]] = []
     if ns and labels.get("pod"):
-        steps.append(lambda: _pod(k8s, ns, labels["pod"], labels.get("container")))
+        steps.append(lambda: for_pod(k8s, ns, labels["pod"], labels.get("container")))
     if ns and labels.get("job_name"):
-        steps.append(lambda: _job(k8s, ns, labels["job_name"]))
+        steps.append(lambda: for_job(k8s, ns, labels["job_name"]))
     for kind, plural, api in (("deployment", "deployments", "apps/v1"), ("statefulset", "statefulsets", "apps/v1"),
                               ("daemonset", "daemonsets", "apps/v1")):
         if ns and labels.get(kind):
-            steps.append(lambda k=kind, p=plural, a=api: _workload(k8s, ns, k, p, a, labels[k]))
+            steps.append(lambda k=kind, p=plural, a=api: for_workload(k8s, ns, k, p, a, labels[k]))
     node = labels.get("node")
     if not node and labels.get("instance"):
         steps.append(lambda: _node_by_instance(k8s, labels["instance"]))
     elif node:
-        steps.append(lambda: _node(k8s, node))
+        steps.append(lambda: for_node(k8s, node))
 
     items: list[Item] = []
     used = 0
@@ -118,7 +118,8 @@ def _state(s: dict | None) -> str:
     return " ".join(bits)
 
 
-def _pod(k8s: K8s, ns: str, name: str, container: str | None = None, log_chars: int = LOG_CHARS) -> list[Item]:
+def for_pod(k8s: K8s, ns: str, name: str, container: str | None = None, log_chars: int = LOG_CHARS) -> list[Item]:
+    """A pod's status, its events and its log tail (the previous container's too, after a restart)."""
     p = k8s.get(f"/api/v1/namespaces/{ns}/pods/{name}")
     st = p.get("status", {})
     lines = [f"phase: {st.get('phase')}  node: {p['spec'].get('nodeName')}  started: {st.get('startTime')}"]
@@ -154,7 +155,8 @@ def _logs(k8s: K8s, ns: str, pod: str, container: str, previous: bool, limit: in
     return Item("logs", source, text, cut)
 
 
-def _job(k8s: K8s, ns: str, name: str) -> list[Item]:
+def for_job(k8s: K8s, ns: str, name: str) -> list[Item]:
+    """A Job's status and events, a line per attempt, and the pods: the first that failed and the newest."""
     j = k8s.get(f"/apis/batch/v1/namespaces/{ns}/jobs/{name}")
     st = j.get("status", {})
     lines = [f"active={st.get('active', 0)} succeeded={st.get('succeeded', 0)} failed={st.get('failed', 0)} "
@@ -178,13 +180,14 @@ def _job(k8s: K8s, ns: str, name: str) -> list[Item]:
         first_failed = next((p for p in pods if p.get("status", {}).get("phase") == "Failed"), None)
         shown = ([first_failed] if first_failed is not None and first_failed is not pods[-1] else []) + [pods[-1]]
         for p in shown:                               # two pods share what one would get, so the op's budget holds both
-            items += _pod(k8s, ns, p["metadata"]["name"], log_chars=LOG_CHARS // len(shown))
+            items += for_pod(k8s, ns, p["metadata"]["name"], log_chars=LOG_CHARS // len(shown))
     else:
         items.append(Item("pod", f"pods of job {ns}/{name}", "(none left: the job's pods were deleted)"))
     return items
 
 
-def _workload(k8s: K8s, ns: str, kind: str, plural: str, api: str, name: str) -> list[Item]:
+def for_workload(k8s: K8s, ns: str, kind: str, plural: str, api: str, name: str) -> list[Item]:
+    """A Deployment's, StatefulSet's or DaemonSet's status and events (`kind` lower-case, as in the alert label)."""
     w = k8s.get(f"/apis/{api}/namespaces/{ns}/{plural}/{name}")
     st = w.get("status", {})
     fields = ("replicas", "readyReplicas", "updatedReplicas", "availableReplicas", "unavailableReplicas",
@@ -199,7 +202,8 @@ def _workload(k8s: K8s, ns: str, kind: str, plural: str, api: str, name: str) ->
 WORKLOAD_KINDS = {"deployment": "Deployment", "statefulset": "StatefulSet", "daemonset": "DaemonSet"}  # event kinds
 
 
-def _node(k8s: K8s, name: str) -> list[Item]:
+def for_node(k8s: K8s, name: str) -> list[Item]:
+    """A node's conditions, allocatable resources and events."""
     n = k8s.get(f"/api/v1/nodes/{name}")
     lines = [f"{c['type']}={c['status']} {c.get('reason', '')}: {c.get('message', '')}".rstrip(": ")
              for c in n.get("status", {}).get("conditions", [])]
@@ -214,7 +218,7 @@ def _node_by_instance(k8s: K8s, instance: str) -> list[Item]:
     ip = instance.rsplit(":", 1)[0]
     for n in k8s.get("/api/v1/nodes")["items"]:
         if any(a.get("address") == ip for a in n.get("status", {}).get("addresses", [])):
-            return _node(k8s, n["metadata"]["name"])
+            return for_node(k8s, n["metadata"]["name"])
     return []                                                    # not a cluster node (e.g. Tower)
 
 

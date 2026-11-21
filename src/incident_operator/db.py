@@ -303,14 +303,26 @@ def incidents_with_status(conn: Conn, status: str, limit: int = 20) -> list[dict
                         (status, limit)).fetchall()
 
 
+def _jsonable(v) -> bool:
+    if v is None:
+        return False
+    try:
+        json.dumps(v)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def add_evidence(conn: Conn, incident_id: int, kind: str, source: str, content: str | None,
                  truncated: bool = False, error: str | None = None, *, trigger: str = "generic",
                  operation: str | None = None, round: int | None = None, data=None) -> None:
+    """`data` is the result's structured form, kept when it is JSON (anything else is stored as NULL; the text
+    stays)."""
     conn.execute(
         "INSERT INTO evidence (incident_id, kind, source, content, truncated, error, trigger, operation, round, data)"
         " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (incident_id, kind, source, content, truncated, error, trigger, operation, round,
-         Jsonb(data) if data is not None else None),
+         Jsonb(data) if _jsonable(data) else None),
     )
 
 

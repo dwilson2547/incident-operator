@@ -19,7 +19,7 @@ import shlex
 
 from . import db
 from .library import EXPECT, Check, Operation
-from .ops import SAFE_VALUE, ParamError, Result, Runner, _fill, resolve_params
+from .ops import SAFE_VALUE, ParamError, Result, Runner, fill, resolve_params
 
 log = logging.getLogger("incident_operator.fixes")
 
@@ -49,7 +49,7 @@ def fix_params(op: Operation, target: dict | None, labels: dict) -> dict[str, st
     """Parameters for a fix: from the target and the alert only (never results, never the model), then the
     namespace checked against the operation's list."""
     params = resolve_params(op, target, labels, {})
-    ns = _fill(op.run["namespace"], params)
+    ns = fill(op.run["namespace"], params)
     if ns not in op.run["namespaces"]:
         raise ParamError(f"namespace {ns!r} isn't one this operation may act in ({', '.join(op.run['namespaces'])})")
     return params
@@ -57,7 +57,7 @@ def fix_params(op: Operation, target: dict | None, labels: dict) -> dict[str, st
 
 def command(op: Operation, params: dict) -> str:
     """The kubectl equivalent, for the page (and for a human to run at `suggest`)."""
-    run = _fill(op.run, params)
+    run = fill(op.run, params)
     q = shlex.quote
     if run["verb"] == "DeletePods":
         sel = ",".join(f"{k}={v}" for k, v in run["selector"].items())
@@ -111,10 +111,9 @@ def run_checks(runner: Runner, library, checks: list[Check], incident: dict) -> 
 
 
 def store(conn, incident_id: int, results: list[Result], trigger: str) -> None:
-    from .triage import _jsonable
     for r in results:
         db.add_evidence(conn, incident_id, r.operation, r.source, r.text, r.truncated, r.error,
-                        trigger=trigger, operation=r.operation, data=_jsonable(r.data))
+                        trigger=trigger, operation=r.operation, data=r.data)
 
 
 def step(conn, library, runner: Runner) -> int:
@@ -168,8 +167,8 @@ def valid_params(op: Operation, params: dict) -> dict[str, str]:
     for k, v in params.items():
         if not isinstance(v, str) or not SAFE_VALUE.match(v):
             raise ParamError(f"parameter {k} isn't a plain name")
-    if _fill(op.run["namespace"], params) not in op.run["namespaces"]:
+    if fill(op.run["namespace"], params) not in op.run["namespaces"]:
         raise ParamError("namespace isn't one this operation may act in")
-    if re.search(r"\{\w+\}", json.dumps(_fill(op.run, params))):
+    if re.search(r"\{\w+\}", json.dumps(fill(op.run, params))):
         raise ParamError("unfilled parameter")
     return params

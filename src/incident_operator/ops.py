@@ -85,13 +85,15 @@ def resolve_params(op: Operation, target: dict | None, labels: dict, earlier: di
     return out
 
 
-def _fill(template: Any, params: dict[str, str], escape=lambda v: v) -> Any:
+def fill(template: Any, params: dict[str, str], escape=lambda v: v) -> Any:
+    """`{name}` placeholders in a run spec (strings, nested in dicts and lists) replaced by the parameters, each
+    passed through `escape` (PromQL quoting for queries)."""
     if isinstance(template, str):
         return re.sub(r"\{(\w+)\}", lambda m: escape(params[m.group(1)]), template)
     if isinstance(template, dict):
-        return {k: _fill(v, params, escape) for k, v in template.items()}
+        return {k: fill(v, params, escape) for k, v in template.items()}
     if isinstance(template, list):
-        return [_fill(v, params, escape) for v in template]
+        return [fill(v, params, escape) for v in template]
     return template
 
 
@@ -186,17 +188,17 @@ class Runner:
         return Result(op.name, op.name, text, truncated=any(i.truncated for i in items))
 
     def _summary(self, op: Operation, params: dict) -> Result:
-        obj = _fill(op.run["object"], params)
+        obj = fill(op.run["object"], params)
         kind, ns, name = obj["kind"], obj.get("namespace"), obj["name"]
         if kind == "Pod":
-            items = evidence._pod(self.k8s, ns, name)
+            items = evidence.for_pod(self.k8s, ns, name)
         elif kind == "Job":
-            items = evidence._job(self.k8s, ns, name)
+            items = evidence.for_job(self.k8s, ns, name)
         elif kind == "Node":
-            items = evidence._node(self.k8s, name)
+            items = evidence.for_node(self.k8s, name)
         else:
             plural = {"Deployment": "deployments", "StatefulSet": "statefulsets", "DaemonSet": "daemonsets"}[kind]
-            items = evidence._workload(self.k8s, ns, kind.lower(), plural, "apps/v1", name)
+            items = evidence.for_workload(self.k8s, ns, kind.lower(), plural, "apps/v1", name)
         if not op.run.get("logs", True):
             items = [i for i in items if i.kind != "logs"]
         res = self._items(op, items)
@@ -204,7 +206,7 @@ class Runner:
         return res
 
     def _get(self, op: Operation, params: dict) -> Result:
-        path = _fill(op.run["path"], params)
+        path = fill(op.run["path"], params)
         obj = self.k8s.get(path)
         lines = []
         for f in op.run["fields"]:
@@ -213,7 +215,7 @@ class Runner:
         return Result(op.name, path, "\n".join(lines), data=obj)
 
     def _events(self, op: Operation, params: dict) -> Result:
-        run = _fill(op.run, params)
+        run = fill(op.run, params)
         ns = run.get("namespace")
         path = f"/api/v1/namespaces/{ns}/events" if ns else "/api/v1/events"
         sel = []
@@ -235,7 +237,7 @@ class Runner:
                       data={"count": len(evs)}, truncated=len(evs) > limit)
 
     def _logs(self, op: Operation, params: dict) -> Result:
-        run = _fill(op.run, params)
+        run = fill(op.run, params)
         ns, pod = run["namespace"], run.get("pod")
         if not pod:                                     # the Job's newest pod
             pods = self.k8s.get(f"/api/v1/namespaces/{ns}/pods", {"labelSelector": f"job-name={run['job']}"})["items"]
@@ -255,7 +257,7 @@ class Runner:
         on a wedged node that is itself a finding."""
         import json as _json
         import uuid
-        node, name = _fill(op.run["node"], params), op.run["probe"]
+        node, name = fill(op.run["node"], params), op.run["probe"]
         ns, image = self.probe_namespace, self.probe_image
         if not (ns and image):
             raise RuntimeError("probes are not configured (PROBE_NAMESPACE, PROBE_IMAGE)")
@@ -290,7 +292,7 @@ class Runner:
         run = op.run
         out, data = [], {}
         for qname, expr in run["queries"].items():
-            expr = _fill(expr, params, _promql_escape)
+            expr = fill(expr, params, _promql_escape)
             if run["kind"] == "promql":
                 res = self.prom.get("/api/v1/query", {"query": expr})["result"]
                 data[qname] = [{"metric": r["metric"], "value": float(r["value"][1])} for r in res]
