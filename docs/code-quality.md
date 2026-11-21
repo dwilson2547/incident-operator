@@ -50,7 +50,7 @@ any of these: the test suite (with a test Postgres, see README: Develop) must pa
       `db.py` queries become named constants. All in `states.py`; queries take them as parameters, `db` signatures
       take the enum (so pyright rejects a bare string), and `tests/test_states.py` holds the schema's CHECK lists to
       the enums. gpu-scheduler's job statuses stay strings: they are its API, not ours.
-- [ ] Incident, turn and fix rows get `TypedDict`s, so a key typo is a type error.
+- [ ] Rows typed, so a key typo is a type error. Done as SQLAlchemy models rather than `TypedDict`s: see section 9.
 
 ## 6. The triage engine
 
@@ -78,5 +78,13 @@ any of these: the test suite (with a test Postgres, see README: Develop) must pa
 
 ## 9. Schema
 
-- [ ] `SCHEMA` becomes numbered migrations with a version row, so the `CREATE TABLE`s show the real tables instead of
-      being followed by a growing list of `ALTER ... IF NOT EXISTS`.
+`SCHEMA` was startup DDL: `CREATE TABLE`s followed by a growing list of `ALTER ... IF NOT EXISTS`, and rows came back
+as untyped dicts. It becomes SQLAlchemy 2.0 models and Alembic migrations (docs/database.md).
+
+- [x] Models and a baseline migration (`models.py`, `migrations/`). A schema dump of a database built from them is
+      identical to production's (2026-11-21); `alembic check` is clean against a database the old DDL built;
+      `tests/test_schema.py` fails when the models change with no migration, CHECKs included.
+- [ ] `db.py` queries ported to the models, one function at a time; callers read attributes (`inc.labels`), so
+      pyright checks every column. The executor's claim keeps `FOR UPDATE SKIP LOCKED`.
+- [ ] Startup runs `schema.upgrade` instead of `SCHEMA`; production stamped at `0001` first (docs/database.md).
+- [ ] Final check: the API's JSON responses from old and new code, on a copy of production data, compared.
