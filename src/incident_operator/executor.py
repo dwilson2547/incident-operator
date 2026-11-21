@@ -14,8 +14,8 @@ import logging
 import time
 
 from . import db
-from .k8s import K8s
 from .fixes import valid_params
+from .k8s import K8s
 from .library import SCRAPEJOB_ACTIONS, Library, Operation
 from .ops import _fill
 from .settings import Env
@@ -60,7 +60,8 @@ def create_job_from(k8s: K8s, run: dict, run_id: int) -> str:
 
 
 def annotate_scrapejob(k8s: K8s, run: dict, run_id: int) -> str:
-    """What `kubectl annotate scrapejob ... --overwrite` does. scrape-job-manager acts on any value it hasn't handled."""
+    """What `kubectl annotate scrapejob ... --overwrite` does. scrape-job-manager acts on any value it hasn't
+    handled."""
     ns, name, action = run["namespace"], run["name"], run["action"]
     if action not in SCRAPEJOB_ACTIONS:
         raise RuntimeError(f"unknown ScrapeJob action {action}")

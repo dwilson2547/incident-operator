@@ -3,20 +3,22 @@ from datetime import timedelta
 
 from conftest import alert, needs_pg
 from fastapi.testclient import TestClient
+from test_runbooks import ADVICE, FINDINGS, ScriptedGpu, engine
+from test_triage import FakeGpu, Mailbox, k8s
+from testconfig import RERUN_MODELS as MODELS
+from testconfig import triage_config, ui_settings
 
 from incident_operator import db, investigate
 from incident_operator.app import create_ui_app
 from incident_operator.investigate import alert_subject, related_block
 from incident_operator.ops import Runner
 from incident_operator.triage import Engine
-from test_runbooks import ADVICE, CHART, FINDINGS, ScriptedGpu, crash_k8s, engine
-from test_triage import FakeGpu, Mailbox, k8s
-from testconfig import RERUN_MODELS as MODELS, triage_config, ui_settings
+
 
 def fire(conn, fp, minutes=0, **labels):
     inc_id, _ = db.record_firing(conn, alert(fp, **labels))
     conn.execute("UPDATE incidents SET starts_at = starts_at + %s WHERE id = %s", (timedelta(minutes=minutes), inc_id))
-    return db.get_incident(conn, inc_id)
+    return db.incident(conn, inc_id)
 
 
 def near(offset, name="ScrapeJobFailing", labels=None, fired=None):
@@ -45,7 +47,8 @@ def test_block_counts_in_code_and_caps_the_list():
 
 
 def test_subject_prefers_the_object_over_the_exporter_pod():
-    assert alert_subject({"scrape_job": "j", "scraper": "s", "pod": "kube-state", "namespace": "n"}) == "scrape_job=j scraper=s"
+    labels = {"scrape_job": "j", "scraper": "s", "pod": "kube-state", "namespace": "n"}
+    assert alert_subject(labels) == "scrape_job=j scraper=s"
     assert alert_subject({"deployment": "d", "namespace": "n"}) == "deployment=d namespace=n"
     assert alert_subject({"severity": "warning"}) == ""
 
@@ -56,13 +59,15 @@ def test_subject_prefers_the_object_over_the_exporter_pod():
 @needs_pg
 def test_related_finds_neighbours_by_alert_time_and_earlier_firings(conn):
     inc = fire(conn, "this", alertname="ScrapeJobFailing", scrape_job="a")
-    near_, other = fire(conn, "n1", 5, alertname="ScrapeJobFailing", scrape_job="b"), fire(conn, "n2", -40, alertname="Other", pod="x")
+    near_ = fire(conn, "n1", 5, alertname="ScrapeJobFailing", scrape_job="b")
+    other = fire(conn, "n2", -40, alertname="Other", pod="x")
     fire(conn, "far", 90, alertname="Far", pod="y")
     conn.execute("UPDATE incidents SET problem_key = 'p' WHERE id = %s", (inc["id"],))
     old = fire(conn, "same", -300, alertname="ScrapeJobFailing", scrape_job="a")
     conn.execute("UPDATE incidents SET problem_key = 'p' WHERE id = %s", (old["id"],))
-    conn.execute("UPDATE incidents SET alert_resolved_at = starts_at + interval '10 minutes' WHERE id = %s", (near_["id"],))
-    r = db.related(conn, db.get_incident(conn, inc["id"]))
+    conn.execute("UPDATE incidents SET alert_resolved_at = starts_at + interval '10 minutes' WHERE id = %s",
+                 (near_["id"],))
+    r = db.related(conn, db.incident(conn, inc["id"]))
     assert [n["id"] for n in r["nearby"]] == [near_["id"], other["id"]]      # nearest first; the far one and itself out
     assert (r["nearby_total"], r["nearby_close"]) == (2, 1)
     assert r["nearby"][0]["offset_seconds"] == 300 and r["nearby"][0]["fired_seconds"] == 600
@@ -76,7 +81,8 @@ def test_investigation_and_remediation_both_see_other_alerts(conn, tmp_path):
     gpu = ScriptedGpu([{"action": "done", "requests": [], "reason": "ok", "findings": FINDINGS}, ADVICE])
     e = engine(conn, gpu, tmp_path)
     inc_id, _ = db.record_firing(conn, alert("main", namespace="n", pod="web-7d9f8-abcde"))
-    db.set_status(conn, fire(conn, "before", 1, alertname="ScrapeJobFailing", scrape_job="first", scraper="one")["id"], "repeat")
+    before = fire(conn, "before", 1, alertname="ScrapeJobFailing", scrape_job="first", scraper="one")
+    db.set_status(conn, before["id"], "repeat")
     e.start_new()
     assert "scrape_job=first" in gpu.submitted[0][0][1]["content"]
     fire(conn, "during", 2, alertname="ScrapeJobFailing", scrape_job="second", scraper="two")   # while it investigates
@@ -84,36 +90,51 @@ def test_investigation_and_remediation_both_see_other_alerts(conn, tmp_path):
     remediation = gpu.submitted[1][0][1]["content"]
     assert "scrape_job=first" in remediation and "scrape_job=second" in remediation
     assert "2 within 1 hour" in remediation
-    assert db.get_incident(conn, inc_id)["status"] == "advising"
+    assert db.incident(conn, inc_id)["status"] == "advising"
 
 
 # -- re-running ----------------------------------------------------------------------------------------------------
 
 
+class NoCluster(Runner):
+    """A runner for a re-run, which must not read the cluster: every operation it is asked to run fails the test."""
+
+    def __init__(self):
+        pass
+
+    def run(self, op, target, labels, earlier):
+        raise AssertionError(f"a re-run ran {op.name} against the cluster")
+
+
+def done(findings) -> dict:
+    """An investigation turn that ends the investigation."""
+    return {"action": "done", "requests": [], "reason": "ok", "findings": findings}
+
+
 def answered(conn, tmp_path, extra=()):
-    gpu = ScriptedGpu([{"action": "done", "requests": [], "reason": "ok", "findings": FINDINGS}, ADVICE, *extra])
+    gpu = ScriptedGpu([done(FINDINGS), ADVICE, *extra])
     e = engine(conn, gpu, tmp_path)
     inc_id, _ = db.record_firing(conn, alert("main", namespace="n", pod="web-7d9f8-abcde"))
     for _ in range(3):
         e.step()
-    assert db.get_incident(conn, inc_id)["status"] == "analysed"
+    assert db.incident(conn, inc_id)["status"] == "analysed"
     return e, gpu, inc_id
 
 
 @needs_pg
 def test_rerun_reads_stored_evidence_with_the_picked_model_and_keeps_the_old_answer(conn, tmp_path):
     second = {**FINDINGS, "summary": "A different reading."}
-    e, gpu, inc_id = answered(conn, tmp_path, [{"action": "done", "requests": [], "reason": "ok", "findings": second}, ADVICE])
+    e, gpu, inc_id = answered(conn, tmp_path, [done(second), ADVICE])
     mail = e.notifier = Mailbox()
     conn.execute("UPDATE incidents SET notified_at = now() WHERE id = %s", (inc_id,))
-    e.k8s, e.runner = None, None                                   # any read of the cluster now blows up
-    evidence_before = len(db.get_incident(conn, inc_id)["evidence"])
+    e.k8s, e.runner = None, NoCluster()                            # any read of the cluster now blows up
+    evidence_before = len(db.incident(conn, inc_id)["evidence"])
     assert db.begin_rerun(conn, inc_id, "gemma4-26b-a4b", "dan") is None
-    inc = db.get_incident(conn, inc_id)
+    inc = db.incident(conn, inc_id)
     assert (inc["status"], inc["attempt"], inc["analysis"], inc["findings"]) == ("rerun", 2, None, None)
     for _ in range(3):
         e.step()
-    inc = db.get_incident(conn, inc_id)
+    inc = db.incident(conn, inc_id)
     assert inc["status"] == "analysed" and inc["findings"]["summary"] == "A different reading."
     assert gpu.models[-2:] == ["gemma4-26b-a4b", "gemma4-26b-a4b"] and gpu.models[:2] == [None, None]
     messages, schema = gpu.submitted[2]
@@ -132,17 +153,18 @@ def test_rerun_reads_stored_evidence_with_the_picked_model_and_keeps_the_old_ans
 def test_a_model_that_asks_for_checks_anyway_cannot_reach_the_cluster(conn, tmp_path):
     e, gpu, inc_id = answered(conn, tmp_path, [{"action": "request", "requests": ["pod-memory-6h"], "reason": "more",
                                                 "findings": FINDINGS}, ADVICE])
-    e.runner = None
+    e.runner = NoCluster()
     db.begin_rerun(conn, inc_id, "qwen35-9b", "dan")
     for _ in range(3):
         e.step()
-    assert db.get_incident(conn, inc_id)["status"] == "analysed"
+    assert db.incident(conn, inc_id)["status"] == "analysed"
 
 
 @needs_pg
 def test_rerun_doesnt_touch_the_brakes(conn, tmp_path):
-    e, gpu, inc_id = answered(conn, tmp_path, [{"action": "done", "requests": [], "reason": "ok", "findings": FINDINGS}, ADVICE])
-    conn.execute("UPDATE incidents SET notified_at = now(), first_seen = now() - interval '3 days' WHERE id = %s", (inc_id,))
+    e, gpu, inc_id = answered(conn, tmp_path, [done(FINDINGS), ADVICE])
+    conn.execute("UPDATE incidents SET notified_at = now(), first_seen = now() - interval '3 days' WHERE id = %s",
+                 (inc_id,))
     used = db.triages_since(conn, 3600)
     db.begin_rerun(conn, inc_id, "qwen35-9b", "dan")
     assert db.health(conn)["oldest_waiting"] == 0
@@ -174,21 +196,21 @@ def test_rerun_over_the_models_limit_fails_without_sending(conn, tmp_path):
     sent = len(gpu.submitted)
     db.begin_rerun(conn, inc_id, "tiny", "dan")
     e.start_reruns()
-    inc = db.get_incident(conn, inc_id)
+    inc = db.incident(conn, inc_id)
     assert inc["status"] == "triage_failed" and "over tiny's limit of 10" in inc["error"]
     assert len(gpu.submitted) == sent
 
 
 @needs_pg
 def test_submit_failure_stays_queued_and_is_retried(conn, tmp_path):
-    e, gpu, inc_id = answered(conn, tmp_path, [{"action": "done", "requests": [], "reason": "ok", "findings": FINDINGS}])
+    e, gpu, inc_id = answered(conn, tmp_path, [done(FINDINGS)])
     db.begin_rerun(conn, inc_id, "qwen35-9b", "dan")
     gpu.down = True
     e.start_reruns()
-    assert db.get_incident(conn, inc_id)["status"] == "rerun"
+    assert db.incident(conn, inc_id)["status"] == "rerun"
     gpu.down = False
     e.start_reruns()
-    assert db.get_incident(conn, inc_id)["status"] == "investigating"
+    assert db.incident(conn, inc_id)["status"] == "investigating"
 
 
 @needs_pg
@@ -199,15 +221,17 @@ def test_rerun_without_a_runbook_is_one_plain_turn(conn, tmp_path):
     cluster = k8s()
     e = Engine(conn, triage_config(primer_path=str(primer)), cluster, gpu, mail, Runner(cluster))
     inc_id, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
-    e.step(); gpu.finish(); e.step()
-    assert db.get_incident(conn, inc_id)["status"] == "analysed"
+    e.step()
+    gpu.finish()
+    e.step()
+    assert db.incident(conn, inc_id)["status"] == "analysed"
     e.k8s = None
     db.begin_rerun(conn, inc_id, "gemma4-26b-a4b", "dan")
     e.start_reruns()
     assert "Broken: 0 vehicles" in gpu.submitted[-1][1]["content"]
     gpu.finish(text="Second answer", ran_model="gemma4-26b-a4b")
     e.step()
-    inc = db.get_incident(conn, inc_id)
+    inc = db.incident(conn, inc_id)
     assert inc["status"] == "analysed" and inc["analysis"] == "Second answer" and inc["attempt"] == 2
     assert inc["earlier_attempts"][0]["analysis"] == "Where it failed: ..."
     assert len(mail.sent) == 1                                     # the first answer only
@@ -225,7 +249,8 @@ def test_rerun_api(conn, tmp_path):
         got = c.get(f"/api/incidents/{inc_id}").json()
         assert got["rerun_models"] == MODELS and got["related"]["nearby"] == []
         url = f"/api/incidents/{inc_id}/rerun"
-        assert c.post(url, content="model=x", headers={"content-type": "application/x-www-form-urlencoded"}).status_code == 415
+        form = {"content-type": "application/x-www-form-urlencoded"}
+        assert c.post(url, content="model=x", headers=form).status_code == 415
         assert c.post(url, json={"model": "not-offered"}).status_code == 422
         assert c.post("/api/incidents/999999/rerun", json={"model": "qwen35-9b"}).status_code == 404
         assert c.post(url, json={"model": "qwen35-9b"}).json() == {"ok": True}

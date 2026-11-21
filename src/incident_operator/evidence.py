@@ -3,7 +3,8 @@
 This is the generic set (design §6.5), used when no runbook matches and by the `alert-objects` read op: whatever the
 alert's labels name. A pod gets its status, events and log tail (previous container's too, after a restart); a Job its
 status, events and its newest pod; a Deployment/StatefulSet/DaemonSet its status and events; a node (label `node`, or
-`instance` mapped to a node by IP) its conditions and events. Every item is capped, and the whole set has a budget, so a small model's prompt stays small.
+`instance` mapped to a node by IP) its conditions and events. Every item is capped, and the whole set has a budget,
+so a small model's prompt stays small.
 
 Everything here only reads, through `K8s.get` (the operator's ClusterRole for this can only get/list pods, pods/log,
 events, jobs, workloads and nodes).
@@ -11,10 +12,9 @@ events, jobs, workloads and nodes).
 from __future__ import annotations
 
 import itertools
-import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from .k8s import K8s
 
@@ -159,7 +159,8 @@ def _job(k8s: K8s, ns: str, name: str) -> list[Item]:
     st = j.get("status", {})
     lines = [f"active={st.get('active', 0)} succeeded={st.get('succeeded', 0)} failed={st.get('failed', 0)} "
              f"started: {st.get('startTime')}  completed: {st.get('completionTime')}",
-             f"backoffLimit={j['spec'].get('backoffLimit')} activeDeadlineSeconds={j['spec'].get('activeDeadlineSeconds')}"]
+             f"backoffLimit={j['spec'].get('backoffLimit')} "
+             f"activeDeadlineSeconds={j['spec'].get('activeDeadlineSeconds')}"]
     for c in st.get("conditions", []):
         lines.append(f"condition {c['type']}={c['status']} {c.get('reason', '')}: {c.get('message', '')}".rstrip(": "))
     items = [Item("job", f"job {ns}/{name}", _cap("\n".join(lines))[0]), _events(k8s, ns, "Job", name)]
@@ -203,7 +204,8 @@ def _node(k8s: K8s, name: str) -> list[Item]:
     lines = [f"{c['type']}={c['status']} {c.get('reason', '')}: {c.get('message', '')}".rstrip(": ")
              for c in n.get("status", {}).get("conditions", [])]
     alloc = n.get("status", {}).get("allocatable", {})
-    lines.append(f"allocatable: cpu={alloc.get('cpu')} memory={alloc.get('memory')} gpu={alloc.get('nvidia.com/gpu', 0)}")
+    lines.append(f"allocatable: cpu={alloc.get('cpu')} memory={alloc.get('memory')} "
+                 f"gpu={alloc.get('nvidia.com/gpu', 0)}")
     return [Item("node", f"node {name}", _cap("\n".join(lines))[0]), _events(k8s, "default", "Node", name)]
 
 

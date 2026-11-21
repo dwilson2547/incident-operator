@@ -53,10 +53,12 @@ def compose(inc: dict, cfg: SmtpConfig) -> EmailMessage:
     where = (f"{t['kind']} {t['namespace'] + '/' if t.get('namespace') else ''}{t['name']}" if t else target(labels))
     ok = inc["status"] == "analysed"
     msg = EmailMessage()
-    msg["Subject"] = f"[triage] {inc['alertname']}" + (f" · {where}" if where else "") + ("" if ok else " (analysis failed)")
+    msg["Subject"] = (f"[triage] {inc['alertname']}" + (f" · {where}" if where else "")
+                      + ("" if ok else " (analysis failed)"))
     msg["From"], msg["To"] = cfg.sender, ", ".join(cfg.to)
     ann = inc.get("annotations") or {}
-    lines = [f"{inc['alertname']} ({inc.get('severity') or 'no severity'}) since {inc.get('starts_at') or inc['first_seen']}"]
+    since = inc.get("starts_at") or inc["first_seen"]
+    lines = [f"{inc['alertname']} ({inc.get('severity') or 'no severity'}) since {since}"]
     if where:
         lines.append(where)
     if ann.get("summary"):
@@ -100,7 +102,8 @@ def compose_fix(run: dict, inc: dict, cfg: SmtpConfig) -> EmailMessage:
     msg = EmailMessage()
     msg["Subject"] = f"[triage] fix {run['operation']}: {FIX_OUTCOME.get(run['status'], run['status'])}"
     msg["From"], msg["To"] = cfg.sender, ", ".join(cfg.to)
-    lines = [f"Incident {inc['id']}: {inc['alertname']}", f"Fix: {run['operation']}, approved by {run.get('decided_by')}",
+    lines = [f"Incident {inc['id']}: {inc['alertname']}",
+             f"Fix: {run['operation']}, approved by {run.get('decided_by')}",
              f"  {run.get('command') or ''}", ""]
     if run.get("result"):
         lines.append(f"What it did: {run['result']}")

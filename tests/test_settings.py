@@ -19,8 +19,12 @@ def read_service(env: Env) -> None:
     """Everything __main__.main reads, in the same way."""
     for name in ("LOG_LEVEL", "DATABASE_URL", "RUNBOOKS_DIR", "OPERATIONS_DIR"):
         env.str(name)
-    env.int("UI_PORT"), env.int("WEBHOOK_PORT")
-    Config.from_env(env), SmtpConfig.from_env(env), UiSettings.from_env(env), Runner.from_env(None, env)
+    env.int("UI_PORT")
+    env.int("WEBHOOK_PORT")
+    Config.from_env(env)
+    SmtpConfig.from_env(env)
+    UiSettings.from_env(env)
+    Runner.from_env(None, env)
 
 
 def read_executor(env: Env) -> None:
@@ -49,7 +53,8 @@ def test_empty_smtp_host_and_issuer_turn_email_and_sign_in_off_without_their_oth
 def test_set_smtp_host_and_issuer_need_their_other_settings():
     env = Env({"SMTP_HOST": "smtp.x", "PUBLIC_URL": "http://x", "OIDC_ISSUER": "https://auth.x",
                "TRIAGE_RERUN_MODELS": "[]"})
-    SmtpConfig.from_env(env), UiSettings.from_env(env)
+    SmtpConfig.from_env(env)
+    UiSettings.from_env(env)
     assert {"SMTP_PORT", "SMTP_STARTTLS", "SMTP_FROM", "SMTP_TO", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET"} <= set(
         env.missing)
 

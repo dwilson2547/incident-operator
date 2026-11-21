@@ -13,8 +13,11 @@ any of these: the test suite (with a test Postgres, see README: Develop) must pa
 
 ## 2. Lint and types in CI
 
-- [ ] `ruff check` in CI, with a config in `pyproject.toml`.
-- [ ] `pyright` in CI (basic mode to start).
+- [x] `ruff check` in CI, with a config in `pyproject.toml` (pyflakes, pycodestyle at 120 columns, import order,
+  bugbear, pyupgrade, simplify, logging).
+- [x] `pyright` in CI (basic mode to start), over `src` and `tests`, with no errors. The fakes now subclass what they
+  stand in for. Tests leave two optional-value rules to the test run (see `pyproject.toml`).
+- [ ] Later: pyright `standard` mode, and `ruff format` once the remaining manual wrapping settles.
 
 ## 3. Private names used across modules
 

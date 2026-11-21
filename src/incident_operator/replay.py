@@ -4,8 +4,8 @@ prompts, and print the outcome next to what happened at the time.
     python -m incident_operator replay [--model M] [--runbooks DIR] [--operations DIR] [--live] ID [ID ...]
 
 Needs the service's triage settings (local.env has them; DATABASE_URL, GPU_SCHEDULER_URL and GPU_SCHEDULER_TOKEN
-pointing at port-forwards to the cluster's Postgres and gpu-scheduler). Runbooks and operations default to the working tree's chart files, so a runbook edit can be tried
-before it is pushed.
+pointing at port-forwards to the cluster's Postgres and gpu-scheduler). Runbooks and operations default to the
+working tree's chart files, so a runbook edit can be tried before it is pushed.
 
 Operation results come from what was stored for the incident, never from the live cluster: the cluster has moved on,
 and replay must not depend on it. A check that wasn't run at the time is answered "not stored", which limits how far a
@@ -23,8 +23,8 @@ import time
 from pathlib import Path
 
 from . import db, investigate
-from .library import Library
 from .k8s import K8s
+from .library import Library
 from .ops import Prometheus, Result, Runner
 from .settings import Env
 from .triage import Config, GpuScheduler
@@ -102,7 +102,7 @@ def replay_triage(inc: dict, gpu: GpuScheduler, cfg: Config, timeout: float) -> 
 
 
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="incident_operator replay", description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(prog="incident_operator replay", description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("ids", nargs="+", type=int)
     ap.add_argument("--model", help="gpu-scheduler model to ask (default: TRIAGE_MODEL), no fallback")
     ap.add_argument("--runbooks", default=str(CHART / "runbooks"))

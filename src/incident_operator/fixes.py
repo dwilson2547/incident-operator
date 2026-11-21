@@ -19,7 +19,7 @@ import shlex
 
 from . import db
 from .library import EXPECT, Check, Operation
-from .ops import ParamError, Result, Runner, SAFE_VALUE, _fill, resolve_params
+from .ops import SAFE_VALUE, ParamError, Result, Runner, _fill, resolve_params
 
 log = logging.getLogger("incident_operator.fixes")
 
@@ -30,12 +30,15 @@ def evaluate(expect: str, data) -> tuple[bool, str]:
     """Check one expectation against a result's structured data. Returns (ok, what was seen)."""
     from .ops import dig
     m = EXPECT.match(expect)
+    if m is None:                                     # library.py validates expectations when it loads them
+        raise ValueError(f"not an expectation: {expect!r}")
     path, op, raw = m.group(1), m.group(2), m.group(3)
     want = json.loads(raw)
     have = dig(data, path) if data is not None else None
     seen = f"{path} = {json.dumps(have)}"
     if op in ("==", "!="):                    # strict: 1 is not true, "0" is not 0
-        same = have == want and isinstance(have, bool) == isinstance(want, bool) and type(have) in (type(want), int, float)
+        same = (have == want and isinstance(have, bool) == isinstance(want, bool)
+                and type(have) in (type(want), int, float))
         return same == (op == "=="), seen
     if not isinstance(have, (int, float)) or isinstance(have, bool) or not isinstance(want, (int, float)):
         return False, seen + " (not a number)"
@@ -120,7 +123,7 @@ def step(conn, library, runner: Runner) -> int:
     for run in db.op_runs_with_status(conn, "approved"):
         n += 1
         op = library.operations.get(run["operation"])
-        inc = db.get_incident(conn, run["incident_id"])
+        inc = db.incident(conn, run["incident_id"])
         if op is None or not op.mutating:
             db.update_op_run(conn, run["id"], "refused", error="the operation is no longer loaded")
             continue
@@ -142,7 +145,7 @@ def step(conn, library, runner: Runner) -> int:
     for run in db.op_runs_due_for_post(conn):
         n += 1
         op = library.operations.get(run["operation"])
-        inc = db.get_incident(conn, run["incident_id"])
+        inc = db.incident(conn, run["incident_id"])
         if op is None:
             db.update_op_run(conn, run["id"], "post_failed", error="the operation is no longer loaded: not verified")
             continue

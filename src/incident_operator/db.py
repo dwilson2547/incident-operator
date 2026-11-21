@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import cast
 
 import psycopg
-from psycopg.rows import dict_row
+from psycopg import sql
+from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 
 SCHEMA = """
@@ -32,7 +35,8 @@ CREATE TABLE IF NOT EXISTS incidents (
     annotations        jsonb NOT NULL,
     generator_url      text,
     status             text NOT NULL DEFAULT 'new'
-                       CHECK (status IN ('new', 'triaging', 'investigating', 'advising', 'analysed', 'triage_failed', 'repeat', 'skipped', 'rerun')),
+                       CHECK (status IN ('new', 'triaging', 'investigating', 'advising', 'analysed',
+                                         'triage_failed', 'repeat', 'skipped', 'rerun')),
     runbook            text,                       -- none in phase 1: every incident needs one
     starts_at          timestamptz,
     first_seen         timestamptz NOT NULL DEFAULT now(),
@@ -53,7 +57,8 @@ ALTER TABLE incidents ADD COLUMN IF NOT EXISTS problem_key text;
 ALTER TABLE incidents ADD COLUMN IF NOT EXISTS repeat_of bigint REFERENCES incidents (id);
 ALTER TABLE incidents DROP CONSTRAINT IF EXISTS incidents_status_check;
 ALTER TABLE incidents ADD CONSTRAINT incidents_status_check
-    CHECK (status IN ('new', 'triaging', 'investigating', 'advising', 'analysed', 'triage_failed', 'repeat', 'skipped', 'rerun'));
+    CHECK (status IN ('new', 'triaging', 'investigating', 'advising', 'analysed',
+                      'triage_failed', 'repeat', 'skipped', 'rerun'));
 CREATE INDEX IF NOT EXISTS incidents_problem_key ON incidents (problem_key, first_seen DESC);
 CREATE INDEX IF NOT EXISTS incidents_repeat_of ON incidents (repeat_of) WHERE repeat_of IS NOT NULL;
 
@@ -156,6 +161,17 @@ ALTER TABLE op_runs ADD CONSTRAINT op_runs_status_check
 """
 
 
+Conn = psycopg.Connection[DictRow]
+"""Every connection here returns rows as dicts (connect, Reconnecting, the UI's pool)."""
+
+
+def one(cur: psycopg.Cursor[DictRow]) -> DictRow:
+    """The row of a query that always returns one (RETURNING, count(*))."""
+    row = cur.fetchone()
+    assert row is not None
+    return row
+
+
 class Reconnecting:
     """A connection for the long-running loops that reopens itself after the server dropped it.
 
@@ -168,8 +184,8 @@ class Reconnecting:
         self._url, self._autocommit = url, autocommit
         self._conn = self._open()
 
-    def _open(self) -> psycopg.Connection:
-        return psycopg.connect(self._url, row_factory=dict_row, autocommit=self._autocommit)
+    def _open(self) -> Conn:
+        return Conn.connect(self._url, row_factory=dict_row, autocommit=self._autocommit)
 
     def __getattr__(self, name):
         if self._conn.closed:
@@ -177,11 +193,12 @@ class Reconnecting:
         return getattr(self._conn, name)
 
 
-def connect(url: str, autocommit: bool = True) -> Reconnecting:
-    return Reconnecting(url, autocommit)
+def connect(url: str, autocommit: bool = True) -> Conn:
+    """Typed as the connection it stands in for: Reconnecting passes every attribute through."""
+    return cast(Conn, Reconnecting(url, autocommit))
 
 
-def migrate(conn: psycopg.Connection) -> None:
+def migrate(conn: Conn) -> None:
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(hashtext('incident_operator.migrate'))")
         conn.execute(SCHEMA)
@@ -218,10 +235,10 @@ def problem_key(labels: dict) -> str:
     return json.dumps(key, sort_keys=True, separators=(",", ":"))
 
 
-def record_firing(conn: psycopg.Connection, alert: dict) -> tuple[int, bool]:
+def record_firing(conn: Conn, alert: dict) -> tuple[int, bool]:
     """Open an incident for a firing alert, or touch the open one with its fingerprint. Returns (id, created)."""
     labels = alert.get("labels") or {}
-    row = conn.execute(
+    row = one(conn.execute(
         """
         INSERT INTO incidents (fingerprint, alertname, severity, labels, annotations, generator_url, starts_at,
                                problem_key)
@@ -233,11 +250,11 @@ def record_firing(conn: psycopg.Connection, alert: dict) -> tuple[int, bool]:
         (alert["fingerprint"], labels.get("alertname", "unknown"), labels.get("severity"), Jsonb(labels),
          Jsonb(alert.get("annotations") or {}), alert.get("generatorURL"), _ts(alert.get("startsAt")),
          problem_key(labels)),
-    ).fetchone()
+    ))
     return row["id"], row["created"]
 
 
-def record_resolved(conn: psycopg.Connection, alert: dict) -> int | None:
+def record_resolved(conn: Conn, alert: dict) -> int | None:
     """Mark the open incident for this fingerprint as resolved. Returns its id, or None if none was open."""
     row = conn.execute(
         "UPDATE incidents SET alert_resolved_at = now(), last_seen = now()"
@@ -255,7 +272,7 @@ def _ts(value: str | None) -> datetime | None:
 
 # -- triage ------------------------------------------------------------------------------------------------------------
 
-def last_triaged(conn: psycopg.Connection, key: str | None, within_seconds: int, exclude_id: int) -> int | None:
+def last_triaged(conn: Conn, key: str | None, within_seconds: int, exclude_id: int) -> int | None:
     """The newest incident with this problem key that was sent to the model within the window, if any."""
     if key is None:
         return None
@@ -272,20 +289,21 @@ def last_triaged(conn: psycopg.Connection, key: str | None, within_seconds: int,
     return row["id"] if row else None
 
 
-def triages_since(conn: psycopg.Connection, seconds: int) -> int:
+def triages_since(conn: Conn, seconds: int) -> int:
     """Incidents whose triage started in the window (an investigation's later turns don't count again). The cap is
     against alert storms: a re-run someone asked for doesn't count, so comparing models can't hold back a real alert."""
-    return conn.execute(
-        "SELECT count(*) AS n FROM model_turns WHERE turn = 1 AND attempt = 1 AND session IN ('triage', 'investigation')"
-        " AND submitted_at > now() - make_interval(secs => %s)", (seconds,)).fetchone()["n"]
+    return one(conn.execute(
+        "SELECT count(*) AS n FROM model_turns"
+        " WHERE turn = 1 AND attempt = 1 AND session IN ('triage', 'investigation')"
+        " AND submitted_at > now() - make_interval(secs => %s)", (seconds,)))["n"]
 
 
-def incidents_with_status(conn: psycopg.Connection, status: str, limit: int = 20) -> list[dict]:
+def incidents_with_status(conn: Conn, status: str, limit: int = 20) -> list[dict]:
     return conn.execute("SELECT * FROM incidents WHERE status = %s ORDER BY first_seen LIMIT %s",
                         (status, limit)).fetchall()
 
 
-def add_evidence(conn: psycopg.Connection, incident_id: int, kind: str, source: str, content: str | None,
+def add_evidence(conn: Conn, incident_id: int, kind: str, source: str, content: str | None,
                  truncated: bool = False, error: str | None = None, *, trigger: str = "generic",
                  operation: str | None = None, round: int | None = None, data=None) -> None:
     conn.execute(
@@ -296,10 +314,10 @@ def add_evidence(conn: psycopg.Connection, incident_id: int, kind: str, source: 
     )
 
 
-def add_turn(conn: psycopg.Connection, incident_id: int, *, session: str, prompt_version: str, model: str,
+def add_turn(conn: Conn, incident_id: int, *, session: str, prompt_version: str, model: str,
              fallback: list[str] | None, messages: list[dict], gpu_job_id, turn: int = 1,
              json_schema: dict | None = None, attempt: int = 1) -> int:
-    return conn.execute(
+    return one(conn.execute(
         """
         INSERT INTO model_turns (incident_id, session, prompt_version, model, fallback, messages, gpu_job_id, turn,
                                  json_schema, attempt)
@@ -307,21 +325,21 @@ def add_turn(conn: psycopg.Connection, incident_id: int, *, session: str, prompt
         """,
         (incident_id, session, prompt_version, model, fallback, Jsonb(messages), gpu_job_id, turn,
          Jsonb(json_schema) if json_schema is not None else None, attempt),
-    ).fetchone()["id"]
+    ))["id"]
 
 
-def pending_turns(conn: psycopg.Connection) -> list[dict]:
+def pending_turns(conn: Conn) -> list[dict]:
     return conn.execute("SELECT * FROM model_turns WHERE status = 'submitted' ORDER BY submitted_at").fetchall()
 
 
-def set_status(conn: psycopg.Connection, incident_id: int, status: str, **fields) -> None:
-    cols = ", ".join(f"{k} = %s" for k in fields)
+def set_status(conn: Conn, incident_id: int, status: str, **fields) -> None:
+    sets = sql.SQL("").join(sql.SQL(", {} = %s").format(sql.Identifier(k)) for k in fields)
     vals = [Jsonb(v) if isinstance(v, (dict, list)) else v for v in fields.values()]
-    conn.execute(f"UPDATE incidents SET status = %s{', ' + cols if cols else ''} WHERE id = %s",
+    conn.execute(sql.SQL("UPDATE incidents SET status = %s{} WHERE id = %s").format(sets),
                  (status, *vals, incident_id))
 
 
-def finish_turn(conn: psycopg.Connection, turn_id: int, *, status: str, result: dict | None = None,
+def finish_turn(conn: Conn, turn_id: int, *, status: str, result: dict | None = None,
                 ran_model: str | None = None, worker: str | None = None, error: str | None = None,
                 output: dict | None = None) -> None:
     conn.execute(
@@ -336,7 +354,7 @@ RERUNNABLE = ("analysed", "triage_failed")
 FIX_UNDER_WAY = ("approved", "ready", "running", "settling")
 
 
-def begin_rerun(conn: psycopg.Connection, incident_id: int, model: str, who: str) -> str | None:
+def begin_rerun(conn: Conn, incident_id: int, model: str, who: str) -> str | None:
     """Queue a re-run with this model: keep the current answer in `earlier_attempts`, supersede a fix still waiting for
     a decision, and mark the incident mailed so the new answer isn't. Returns why it can't start, or None if it did."""
     with conn.transaction():
@@ -350,7 +368,7 @@ def begin_rerun(conn: psycopg.Connection, incident_id: int, model: str, who: str
             return "a fix is under way on this incident"
         earlier = {k: inc[k] for k in ("attempt", "status", "analysis", "analysis_model", "analysis_worker", "findings",
                                        "advice", "error", "runbook", "runbook_rev", "rerun_by")}
-        earlier["replaced_at"] = datetime.now(timezone.utc).isoformat()
+        earlier["replaced_at"] = datetime.now(UTC).isoformat()
         conn.execute(
             "UPDATE op_runs SET status = 'superseded', finished_at = now()"
             " WHERE incident_id = %s AND status = 'proposed'", (incident_id,))
@@ -365,35 +383,35 @@ def begin_rerun(conn: psycopg.Connection, incident_id: int, model: str, who: str
     return None
 
 
-def to_notify(conn: psycopg.Connection) -> list[dict]:
+def to_notify(conn: Conn) -> list[dict]:
     return conn.execute(
         "SELECT * FROM incidents WHERE status IN ('analysed', 'triage_failed') AND notified_at IS NULL ORDER BY id"
     ).fetchall()
 
 
-def mark_notified(conn: psycopg.Connection, incident_id: int) -> None:
+def mark_notified(conn: Conn, incident_id: int) -> None:
     conn.execute("UPDATE incidents SET notified_at = now() WHERE id = %s", (incident_id,))
 
 
-# -- fixes (fixes.py, executor.py) ---------------------------------------------------------------------------------------
+# -- fixes (fixes.py, executor.py) -------------------------------------------------------------------------------------
 
-def add_op_run(conn: psycopg.Connection, incident_id: int, operation: str, op_rev: str, params: dict, autonomy: str,
+def add_op_run(conn: Conn, incident_id: int, operation: str, op_rev: str, params: dict, autonomy: str,
                status: str, command: str | None = None, error: str | None = None) -> int:
-    return conn.execute(
+    return one(conn.execute(
         "INSERT INTO op_runs (incident_id, operation, op_rev, params, autonomy, status, command, error, finished_at)"
         " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CASE WHEN %s = 'refused' THEN now() END) RETURNING id",
-        (incident_id, operation, op_rev, Jsonb(params), autonomy, status, command, error, status)).fetchone()["id"]
+        (incident_id, operation, op_rev, Jsonb(params), autonomy, status, command, error, status)))["id"]
 
 
-def get_op_run(conn: psycopg.Connection, run_id: int) -> dict | None:
+def get_op_run(conn: Conn, run_id: int) -> dict | None:
     return conn.execute("SELECT * FROM op_runs WHERE id = %s", (run_id,)).fetchone()
 
 
-def op_runs_with_status(conn: psycopg.Connection, status: str) -> list[dict]:
+def op_runs_with_status(conn: Conn, status: str) -> list[dict]:
     return conn.execute("SELECT * FROM op_runs WHERE status = %s ORDER BY id", (status,)).fetchall()
 
 
-def decide_op_run(conn: psycopg.Connection, run_id: int, approve: bool, who: str) -> bool:
+def decide_op_run(conn: Conn, run_id: int, approve: bool, who: str) -> bool:
     """Approve or reject a proposed fix. False if it isn't awaiting a decision (already decided, or suggest-only)."""
     row = conn.execute(
         "UPDATE op_runs SET status = %s, decided_by = %s, decided_at = now(),"
@@ -405,13 +423,14 @@ def decide_op_run(conn: psycopg.Connection, run_id: int, approve: bool, who: str
 _FINAL = ("refused", "rejected", "failed", "succeeded", "post_failed", "superseded")
 
 
-def update_op_run(conn: psycopg.Connection, run_id: int, status: str, *, checks: str | None = None,
+def update_op_run(conn: Conn, run_id: int, status: str, *, checks: str | None = None,
                   result: str | None = None, error: str | None = None, settle_seconds: int | None = None) -> None:
     conn.execute(
         """
         UPDATE op_runs SET status = %(s)s,
             checks = coalesce(%(checks)s, checks), result = coalesce(%(result)s, result), error = %(error)s,
-            post_due_at = CASE WHEN %(settle)s::int IS NOT NULL THEN now() + make_interval(secs => %(settle)s) ELSE post_due_at END,
+            post_due_at = CASE WHEN %(settle)s::int IS NOT NULL THEN now() + make_interval(secs => %(settle)s)
+                               ELSE post_due_at END,
             finished_at = CASE WHEN %(s)s = ANY(%(final)s) THEN now() ELSE finished_at END
         WHERE id = %(id)s
         """,
@@ -419,7 +438,7 @@ def update_op_run(conn: psycopg.Connection, run_id: int, status: str, *, checks:
          "final": list(_FINAL), "id": run_id})
 
 
-def claim_ready(conn: psycopg.Connection) -> dict | None:
+def claim_ready(conn: Conn) -> dict | None:
     """The executor takes the oldest ready run (one executor, but safe with more)."""
     return conn.execute(
         "UPDATE op_runs SET status = 'running', started_at = now() WHERE id = ("
@@ -427,12 +446,12 @@ def claim_ready(conn: psycopg.Connection) -> dict | None:
     ).fetchone()
 
 
-def op_runs_due_for_post(conn: psycopg.Connection) -> list[dict]:
+def op_runs_due_for_post(conn: Conn) -> list[dict]:
     return conn.execute("SELECT * FROM op_runs WHERE status = 'settling' AND post_due_at <= now() ORDER BY id"
                         ).fetchall()
 
 
-def expire_ready(conn: psycopg.Connection, seconds: int) -> int:
+def expire_ready(conn: Conn, seconds: int) -> int:
     return len(conn.execute(
         "UPDATE op_runs SET status = 'failed', finished_at = now(),"
         " error = 'the executor did not take it in time: is the executor running?'"
@@ -440,29 +459,29 @@ def expire_ready(conn: psycopg.Connection, seconds: int) -> int:
     ).fetchall())
 
 
-def op_runs_since(conn: psycopg.Connection, operation: str, seconds: int, params: dict | None = None) -> int:
+def op_runs_since(conn: Conn, operation: str, seconds: int, params: dict | None = None) -> int:
     """Runs of an operation that reached the cluster (or are about to) in the window, for its limits."""
-    return conn.execute(
+    return one(conn.execute(
         "SELECT count(*) AS n FROM op_runs WHERE operation = %s"
         " AND status IN ('ready', 'running', 'settling', 'failed', 'succeeded', 'post_failed')"
         " AND coalesce(started_at, decided_at) > now() - make_interval(secs => %s)"
         " AND (%s::jsonb IS NULL OR params = %s::jsonb)",
         (operation, seconds, Jsonb(params) if params is not None else None,
-         Jsonb(params) if params is not None else None)).fetchone()["n"]
+         Jsonb(params) if params is not None else None)))["n"]
 
 
-def op_runs_to_notify(conn: psycopg.Connection) -> list[dict]:
+def op_runs_to_notify(conn: Conn) -> list[dict]:
     """Outcomes of approved fixes not yet mailed (the proposal itself goes out with the incident's email)."""
     return conn.execute(
         "SELECT * FROM op_runs WHERE decided_by IS NOT NULL AND status = ANY(%s)"
         " AND notified IS DISTINCT FROM status ORDER BY id", (list(_FINAL),)).fetchall()
 
 
-def mark_op_run_notified(conn: psycopg.Connection, run_id: int, status: str) -> None:
+def mark_op_run_notified(conn: Conn, run_id: int, status: str) -> None:
     conn.execute("UPDATE op_runs SET notified = %s WHERE id = %s", (status, run_id))
 
 
-def operation_records(conn: psycopg.Connection) -> list[dict]:
+def operation_records(conn: Conn) -> list[dict]:
     """Each fix's record (design §7.1), what moving it up an autonomy level is decided on."""
     return conn.execute(
         """
@@ -480,14 +499,14 @@ def operation_records(conn: psycopg.Connection) -> list[dict]:
 
 # -- health (/metrics) -----------------------------------------------------------------------------------------------
 
-def health(conn: psycopg.Connection) -> dict:
+def health(conn: Conn) -> dict:
     """What the operator's own alerts watch: incidents by status, the oldest one still waiting for triage, the oldest
     answer not yet mailed, and fixes by status."""
     out = {"incidents": {r["status"]: r["n"] for r in conn.execute(
         "SELECT status, count(*) AS n FROM incidents GROUP BY status").fetchall()},
            "fixes": {r["status"]: r["n"] for r in conn.execute(
         "SELECT status, count(*) AS n FROM op_runs GROUP BY status").fetchall()}}
-    out |= conn.execute(
+    out |= one(conn.execute(
         """
         SELECT coalesce(extract(epoch FROM now() - min(first_seen) FILTER (
                    WHERE status IN ('new', 'triaging', 'investigating', 'advising') AND attempt = 1)), 0)
@@ -495,7 +514,7 @@ def health(conn: psycopg.Connection) -> dict:
                coalesce(extract(epoch FROM now() - min(first_seen) FILTER (
                    WHERE status IN ('analysed', 'triage_failed') AND notified_at IS NULL)), 0) AS oldest_unmailed
         FROM incidents
-        """).fetchone()
+        """))
     return out
 
 
@@ -504,7 +523,7 @@ def health(conn: psycopg.Connection) -> dict:
 class LastGood:
     """library.Library's store for the last good version of each file."""
 
-    def __init__(self, conn: psycopg.Connection):
+    def __init__(self, conn: Conn):
         self.conn = conn
 
     def save(self, file: str, content: bytes, rev: str) -> None:
@@ -520,7 +539,7 @@ class LastGood:
 
 # -- reading (UI) ------------------------------------------------------------------------------------------------------
 
-def list_incidents(conn: psycopg.Connection, limit: int = 200) -> list[dict]:
+def list_incidents(conn: Conn, limit: int = 200) -> list[dict]:
     return conn.execute(
         """
         SELECT i.id, i.fingerprint, i.alertname, i.severity, i.labels, i.status, i.runbook, i.first_seen, i.last_seen,
@@ -540,7 +559,15 @@ def list_incidents(conn: psycopg.Connection, limit: int = 200) -> list[dict]:
     ).fetchall()
 
 
-def get_incident(conn: psycopg.Connection, incident_id: int) -> dict | None:
+def incident(conn: Conn, incident_id: int) -> dict:
+    """get_incident for an id the caller just read from the database: a missing one is a bug, not a 404."""
+    inc = get_incident(conn, incident_id)
+    if inc is None:
+        raise LookupError(f"incident {incident_id} does not exist")
+    return inc
+
+
+def get_incident(conn: Conn, incident_id: int) -> dict | None:
     inc = conn.execute("SELECT * FROM incidents WHERE id = %s", (incident_id,)).fetchone()
     if inc is None:
         return None
@@ -560,7 +587,7 @@ RELATED_CLOSE_SECONDS = 600       # counted apart: alerts fired by one cause ten
 _AT = "coalesce(starts_at, first_seen)"
 
 
-def related(conn: psycopg.Connection, inc: dict, limit: int = 50) -> dict:
+def related(conn: Conn, inc: dict, limit: int = 50) -> dict:
     """What else was going on, from the incident list alone: any other alert around this one's time, nearest first, and
     how often this same problem fired before it. Measured from this incident, not from now, so a re-run of an old one
     sees its own moment. Alerts that came in after it are included if they are in by now."""
@@ -590,12 +617,12 @@ def related(conn: psycopg.Connection, inc: dict, limit: int = 50) -> dict:
             "earlier_total": earlier[0]["total"] if earlier else 0}
 
 
-def runbook_usage(conn: psycopg.Connection) -> list[dict]:
+def runbook_usage(conn: Conn) -> list[dict]:
     return conn.execute("SELECT runbook, count(*) AS incidents, max(first_seen) AS last_matched FROM incidents"
                         " WHERE runbook IS NOT NULL GROUP BY runbook").fetchall()
 
 
-def needs_runbook(conn: psycopg.Connection, covered=None) -> list[dict]:
+def needs_runbook(conn: Conn, covered: Callable[[dict], bool] | None = None) -> list[dict]:
     """Alertnames that have fired with no runbook: the to-do list for writing runbooks (design §8.1).
 
     `covered(labels)` says whether a runbook matches an incident now. Those are left out: a runbook written after an

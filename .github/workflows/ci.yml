@@ -36,9 +36,24 @@ jobs:
           pip install -e '.[test]'
           pytest -q
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Ruff and pyright
+        # pyright resolves imports from .venv (pyproject [tool.pyright]), as it does locally
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -e '.[test,lint]'
+          .venv/bin/ruff check src tests
+          .venv/bin/pyright
+
   publish-image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: tests
+    needs: [tests, lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

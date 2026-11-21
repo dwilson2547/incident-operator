@@ -16,7 +16,7 @@ import os
 import sys
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 PROBES = {}
 
@@ -27,7 +27,12 @@ def probe(fn):
 
 
 def _iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _read(path: str) -> str:
+    with open(path) as f:
+        return f.read()
 
 
 def _tasks(proc: str):
@@ -42,10 +47,10 @@ def _tasks(proc: str):
             tids = [pid]
         for tid in tids:
             try:
-                raw = open(f"{proc}/{pid}/task/{tid}/stat").read()
+                raw = _read(f"{proc}/{pid}/task/{tid}/stat")
             except OSError:
                 try:
-                    raw = open(f"{proc}/{pid}/stat").read() if tid == pid else None
+                    raw = _read(f"{proc}/{pid}/stat") if tid == pid else None
                 except OSError:
                     raw = None
                 if raw is None:
@@ -62,7 +67,7 @@ def nfs_dstate(proc: str = "/proc", now: float | None = None) -> dict:
     whose deletion kills them), `nfsplugin` threads in D, and the NFSv4 state manager kernel thread
     (`<server>-manager`). On 2026-10-22 there was no manager thread, so it can't be the only sign."""
     now = time.time() if now is None else now
-    btime = next(int(line.split()[1]) for line in open(f"{proc}/stat") if line.startswith("btime"))
+    btime = next(int(line.split()[1]) for line in _read(f"{proc}/stat").splitlines() if line.startswith("btime"))
     comm_of: dict[int, str] = {}
     tasks = list(_tasks(proc))
     for pid, tid, comm, *_ in tasks:

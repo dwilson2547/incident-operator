@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 from conftest import alert, needs_pg
+from test_evidence import EVENTS, POD, FakeK8s
+from testconfig import triage_config
 
 from incident_operator import db, investigate
 from incident_operator.library import Library, resolve_target
 from incident_operator.ops import Prometheus, Result, Runner
-from incident_operator.triage import Engine
-from test_evidence import EVENTS, POD, FakeK8s
-from testconfig import triage_config
+from incident_operator.triage import Engine, GpuScheduler
 
 CHART = Path(__file__).resolve().parents[1] / "helm" / "incident-operator" / "files"
 
@@ -36,18 +36,20 @@ def test_shipped_files_load_cleanly():
     lib = load(CHART)
     assert lib.errors == {}
     assert set(lib.runbooks) == {"pod-crashloop", "backup-job-failed", "nfs-client-wedge", "scraper-failures",
-                                "deployment-rollout", "job-failed", "tower-container-cpu", "node-not-ready", "pvc-filling",
-                                "node-disk-filling", "target-down", "statefulset-rollout", "daemonset-rollout"}
+                                "deployment-rollout", "job-failed", "tower-container-cpu", "node-not-ready",
+                                "pvc-filling", "node-disk-filling", "target-down", "statefulset-rollout",
+                                "daemonset-rollout"}
     assert not any(r.warnings for r in lib.runbooks.values())          # all under the 800-token warning
-    for alert in ("ScrapeJobFailing", "ScrapeJobStale", "ScrapeJobSuspended"):
-        assert lib.match({"alertname": alert, "scrape_job": "s", "exported_namespace": "g"}).name == "scraper-failures"
-    for alert, runbook in (("KubeNodeNotReady", "node-not-ready"), ("KubeNodeUnreachable", "node-not-ready"),
-                           ("KubeNodeReadinessFlapping", "node-not-ready"), ("KubePersistentVolumeFillingUp", "pvc-filling"),
-                           ("NodeFilesystemSpaceFillingUp", "node-disk-filling"),
-                           ("NodeFilesystemAlmostOutOfSpace", "node-disk-filling"), ("TargetDown", "target-down"),
-                           ("KubeStatefulSetReplicasMismatch", "statefulset-rollout"),
-                           ("KubeDaemonSetRolloutStuck", "daemonset-rollout")):
-        assert lib.match({"alertname": alert}).name == runbook
+    for name in ("ScrapeJobFailing", "ScrapeJobStale", "ScrapeJobSuspended"):
+        assert lib.match({"alertname": name, "scrape_job": "s", "exported_namespace": "g"}).name == "scraper-failures"
+    for name, runbook in (("KubeNodeNotReady", "node-not-ready"), ("KubeNodeUnreachable", "node-not-ready"),
+                          ("KubeNodeReadinessFlapping", "node-not-ready"),
+                          ("KubePersistentVolumeFillingUp", "pvc-filling"),
+                          ("NodeFilesystemSpaceFillingUp", "node-disk-filling"),
+                          ("NodeFilesystemAlmostOutOfSpace", "node-disk-filling"), ("TargetDown", "target-down"),
+                          ("KubeStatefulSetReplicasMismatch", "statefulset-rollout"),
+                          ("KubeDaemonSetRolloutStuck", "daemonset-rollout")):
+        assert lib.match({"alertname": name}).name == runbook
 
 
 def test_matching_and_priority(lib_dirs):
@@ -92,7 +94,8 @@ def test_runbook_sections(lib_dirs):
 
 def test_target_resolution():
     lib = load(CHART)
-    node = {"metadata": {"name": "k8s-worker1"}, "status": {"addresses": [{"type": "InternalIP", "address": "192.168.0.36"}]}}
+    node = {"metadata": {"name": "k8s-worker1"},
+            "status": {"addresses": [{"type": "InternalIP", "address": "192.168.0.36"}]}}
     k = FakeK8s({"/api/v1/nodes": {"items": [node]}})
     nfs = lib.runbooks["nfs-client-wedge"]
     assert resolve_target(nfs, {"instance": "192.168.0.36:9100"}, k) == {"kind": "Node", "name": "k8s-worker1"}
@@ -126,7 +129,8 @@ def test_params_come_only_from_target_labels_and_results():
     assert bad.error and "plain name" in bad.error and len(prom.queries) == 1   # never reached Prometheus
     missing = r.run(lib.operations["scrape-last-run"], {"kind": "ScrapeJob", "name": "s", "namespace": "g"}, {}, {})
     assert "hasn't run" in missing.error
-    hist = r.run(lib.operations["cronjob-history"], {"kind": "Job", "name": "j", "namespace": "n"}, {"cronjob": "c"}, {})
+    job = {"kind": "Job", "name": "j", "namespace": "n"}
+    hist = r.run(lib.operations["cronjob-history"], job, {"cronjob": "c"}, {})
     assert "instance" not in hist.text and "= 20.5" in hist.text               # exporter labels dropped
 
 
@@ -149,11 +153,13 @@ def test_events_filtered_to_the_node():
     lib = load(CHART)
     evs = {"items": [
         {"reason": "FailedMount", "type": "Warning", "message": "timed out", "lastTimestamp": "2026-11-01T10:00:00Z",
-         "involvedObject": {"kind": "Pod", "namespace": "postgres", "name": "backup-1"}, "source": {"host": "k8s-worker1"}},
+         "involvedObject": {"kind": "Pod", "namespace": "postgres", "name": "backup-1"},
+         "source": {"host": "k8s-worker1"}},
         {"reason": "FailedMount", "type": "Warning", "message": "other node", "lastTimestamp": "2026-11-01T10:00:00Z",
          "involvedObject": {"kind": "Pod", "namespace": "x", "name": "y"}, "source": {"host": "k8s-worker2"}}]}
     k = FakeK8s({"/api/v1/events": evs})
-    res = Runner(k, FakeProm()).run(lib.operations["node-failedmount-events"], {"kind": "Node", "name": "k8s-worker1"}, {}, {})
+    node = {"kind": "Node", "name": "k8s-worker1"}
+    res = Runner(k, FakeProm()).run(lib.operations["node-failedmount-events"], node, {}, {})
     assert "backup-1" in res.text and "other node" not in res.text
     assert k.calls[-1][1] == {"fieldSelector": "reason=FailedMount"}
 
@@ -170,7 +176,7 @@ def test_investigation_schema_only_allows_done_on_the_last_round():
 CUT_OFF = object()                 # a reply that ran into max_new_tokens: unfinished JSON
 
 
-class ScriptedGpu:
+class ScriptedGpu(GpuScheduler):
     """Answers each submitted job with the next scripted JSON reply."""
 
     def __init__(self, replies):
@@ -199,8 +205,9 @@ ADVICE = {"suggestion": "Raise the memory limit in values.", "why": "It hits the
 
 
 def crash_k8s():
-    oom = {**POD, "status": {**POD["status"], "containerStatuses": [{"name": "scraper", "restartCount": 3, "state": {
-        "waiting": {"reason": "CrashLoopBackOff"}}, "lastState": {"terminated": {"reason": "OOMKilled", "exitCode": 137}}}]}}
+    oom = {**POD, "status": {**POD["status"], "containerStatuses": [{
+        "name": "scraper", "restartCount": 3, "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+        "lastState": {"terminated": {"reason": "OOMKilled", "exitCode": 137}}}]}}
     return FakeK8s({"/api/v1/namespaces/n/pods/web-7d9f8-abcde": oom, "/api/v1/namespaces/n/events": EVENTS,
                     "/api/v1/namespaces/n/pods/web-7d9f8-abcde/log?previous=false": "starting",
                     "/api/v1/namespaces/n/pods/web-7d9f8-abcde/log?previous=true": "allocating cache"})
@@ -217,7 +224,8 @@ def engine(conn, gpu, tmp_path, k8s=None):
 @needs_pg
 def test_investigation_requests_a_check_then_finishes_and_gets_advice(conn, tmp_path):
     gpu = ScriptedGpu([
-        {"action": "request", "requests": ["pod-memory-6h", "pod-memory-6h"], "reason": "is it a leak?", "findings": FINDINGS},
+        {"action": "request", "requests": ["pod-memory-6h", "pod-memory-6h"], "reason": "is it a leak?",
+         "findings": FINDINGS},
         {"action": "done", "requests": [], "reason": "enough", "findings": FINDINGS},
         ADVICE])
     e = engine(conn, gpu, tmp_path)
@@ -225,7 +233,7 @@ def test_investigation_requests_a_check_then_finishes_and_gets_advice(conn, tmp_
     e.step()                                     # precursors + turn 1, answered + turn 2, answered + remediation, ...
     for _ in range(4):
         e.step()
-    inc = db.get_incident(conn, inc_id)
+    inc = db.incident(conn, inc_id)
     assert inc["status"] == "analysed" and inc["runbook"] == "pod-crashloop" and inc["runbook_rev"]
     assert inc["target"] == {"kind": "Pod", "name": "web-7d9f8-abcde", "namespace": "n"}
     assert [(e_["trigger"], e_["operation"]) for e_ in inc["evidence"]] == [
@@ -233,7 +241,8 @@ def test_investigation_requests_a_check_then_finishes_and_gets_advice(conn, tmp_
     assert [(t["session"], t["turn"]) for t in inc["turns"]] == [("investigation", 1), ("investigation", 2),
                                                                  ("remediation", 3)]
     first_user = gpu.submitted[0][0][1]["content"]
-    assert "OOMKilled" in first_user and "pod-memory-6h:" in first_user and "Exit 137 = OOMKilled." in gpu.submitted[0][0][0]["content"]
+    assert "OOMKilled" in first_user and "pod-memory-6h:" in first_user
+    assert "Exit 137 = OOMKilled." in gpu.submitted[0][0][0]["content"]
     assert gpu.submitted[0][1]["properties"]["action"]["enum"] == ["request", "done"]
     remediation = gpu.submitted[2][0]
     assert "allocating cache" not in json.dumps(remediation)            # no raw evidence reaches remediation
@@ -251,7 +260,7 @@ def test_last_round_must_finish(conn, tmp_path):
     inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
     for _ in range(6):
         e.step()
-    assert db.get_incident(conn, inc_id)["status"] == "analysed"
+    assert db.incident(conn, inc_id)["status"] == "analysed"
     assert gpu.submitted[2][1]["properties"]["action"]["enum"] == ["done"]          # turn 3 of 3
     assert "last turn" in gpu.submitted[2][0][-1]["content"]
 
@@ -261,15 +270,18 @@ def test_gpu_outage_mid_loop_resumes(conn, tmp_path):
     gpu = ScriptedGpu([{"action": "done", "requests": [], "reason": "r", "findings": FINDINGS}, ADVICE])
     e = engine(conn, gpu, tmp_path)
     inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    assert e.library
     e.library.refresh()
     e.start_new()                                # turn 1 submitted (and, scripted, already answered)
     gpu.down = True                              # ...but the remediation turn can't be submitted
-    e.poll(); e.poll()
-    inc = db.get_incident(conn, inc_id)
+    e.poll()
+    e.poll()
+    inc = db.incident(conn, inc_id)
     assert inc["status"] == "investigating" and inc["turns"][0]["status"] == "submitted"   # waits, nothing lost
     gpu.down = False
-    e.step(); e.step()
-    assert db.get_incident(conn, inc_id)["status"] == "analysed"
+    e.step()
+    e.step()
+    assert db.incident(conn, inc_id)["status"] == "analysed"
 
 
 @needs_pg
@@ -280,8 +292,9 @@ def test_checks_listed_with_done_still_run_while_rounds_remain(conn, tmp_path):
     inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
     for _ in range(4):
         e.step()
-    inc = db.get_incident(conn, inc_id)
-    assert inc["status"] == "analysed" and [t["session"] for t in inc["turns"]] == ["investigation"] * 2 + ["remediation"]
+    inc = db.incident(conn, inc_id)
+    assert inc["status"] == "analysed"
+    assert [t["session"] for t in inc["turns"]] == ["investigation"] * 2 + ["remediation"]
     assert any(x["operation"] == "pod-restarts-6h" for x in inc["evidence"])
 
 
@@ -290,8 +303,9 @@ def test_reply_that_isnt_json_fails_the_incident(conn, tmp_path):
     gpu = ScriptedGpu([None])
     e = engine(conn, gpu, tmp_path)
     inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
-    e.step(); e.step()
-    inc = db.get_incident(conn, inc_id)
+    e.step()
+    e.step()
+    inc = db.incident(conn, inc_id)
     assert inc["status"] == "triage_failed" and "wasn't the JSON" in inc["error"]
 
 
@@ -310,7 +324,7 @@ def test_cut_off_investigation_reply_is_retried_with_a_changed_prompt(conn, tmp_
     inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
     for _ in range(4):
         e.step()
-    inc = db.get_incident(conn, inc_id)
+    inc = db.incident(conn, inc_id)
     assert inc["status"] == "analysed"
     assert [(t["session"], t["turn"]) for t in inc["turns"]] == [("investigation", 1), ("investigation", 1),
                                                                  ("remediation", 2)]
@@ -326,7 +340,7 @@ def test_cut_off_remediation_reply_is_retried(conn, tmp_path):
     inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
     for _ in range(4):
         e.step()
-    inc = db.get_incident(conn, inc_id)
+    inc = db.incident(conn, inc_id)
     assert inc["status"] == "analysed" and [t["session"] for t in inc["turns"]] == ["investigation", "remediation",
                                                                                     "remediation"]
 
@@ -338,7 +352,7 @@ def test_second_cut_off_reply_fails_and_says_why(conn, tmp_path):
     inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
     for _ in range(4):
         e.step()
-    inc = db.get_incident(conn, inc_id)
+    inc = db.incident(conn, inc_id)
     assert inc["status"] == "triage_failed" and "1536-token limit" in inc["error"] and len(gpu.submitted) == 2
 
 
@@ -350,12 +364,12 @@ def test_retry_waits_for_an_unreachable_gpu_scheduler(conn, tmp_path):
     e.start_new()
     gpu.down = True
     assert e.poll() == 0
-    inc = db.get_incident(conn, inc_id)
+    inc = db.incident(conn, inc_id)
     assert inc["status"] == "investigating" and [t["status"] for t in inc["turns"]] == ["submitted"]
     gpu.down = False
     for _ in range(3):
         e.step()
-    assert db.get_incident(conn, inc_id)["status"] == "analysed"
+    assert db.incident(conn, inc_id)["status"] == "analysed"
 
 
 @needs_pg
@@ -365,13 +379,14 @@ def test_alert_without_runbook_still_gets_phase_1_triage(conn, tmp_path):
     e = engine(conn, gpu, tmp_path)
     inc_id, _ = db.record_firing(conn, alert(alertname="NodeClockNotSynchronising"))
     e.step()
-    assert db.get_incident(conn, inc_id)["status"] == "triaging" and db.get_incident(conn, inc_id)["runbook"] is None
+    assert db.incident(conn, inc_id)["status"] == "triaging" and db.incident(conn, inc_id)["runbook"] is None
 
 
 def test_render_analysis_skips_empty_escalation():
     text = investigate.render_analysis(FINDINGS, ADVICE)
     assert "Escalate" not in text and text.startswith("What failed: container app OOMKilled")
-    assert "Escalate to a human: reboot" in investigate.render_analysis(FINDINGS, {**ADVICE, "escalate_to_human": "reboot"})
+    escalated = investigate.render_analysis(FINDINGS, {**ADVICE, "escalate_to_human": "reboot"})
+    assert "Escalate to a human: reboot" in escalated
 
 
 def test_results_respect_the_budget():

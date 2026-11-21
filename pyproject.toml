@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8", "aiosmtpd>=1.4"]
+lint = ["ruff==0.17.6", "pyright==1.1.414"]   # pinned: a new release adds rules, and CI should only fail on code
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -29,3 +30,34 @@ incident_operator = ["static/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# pyflakes + pycodestyle errors (incl. line length), import order, bugbear, pyupgrade, simplify, logging.
+select = ["F", "E", "W", "I", "B", "UP", "SIM", "LOG"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends"]          # FastAPI's dependency declarations, not shared defaults
+
+[tool.ruff.lint.isort]
+known-first-party = ["incident_operator"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
+
+[[tool.pyright.executionEnvironments]]
+root = "tests"                                       # the tests import each other's fakes as top-level modules
+# Tests assert on values the code types as optional (`"x" in result.text`, `lib.match(...).name`); there a None
+# already fails the test, so these two are left to the test run rather than an assert before every check.
+reportOptionalMemberAccess = false
+reportOperatorIssue = false
+
+[[tool.pyright.executionEnvironments]]
+root = "src"

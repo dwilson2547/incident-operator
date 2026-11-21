@@ -3,11 +3,12 @@ import json
 import os
 
 import pytest
+from test_runbooks import CHART, FakeProm, load
 
 from incident_operator import probes
+from incident_operator.k8s import K8s
 from incident_operator.library import Library
 from incident_operator.ops import Runner, probe_job
-from test_runbooks import CHART, FakeProm, load
 
 BOOT = 1_700_000_000
 HZ = os.sysconf("SC_CLK_TCK")
@@ -73,7 +74,7 @@ def test_probe_job_is_locked_down():
     assert c["command"] == ["python", "-m", "incident_operator.probes", "nfs-dstate"]
 
 
-class ProbeK8s:
+class ProbeK8s(K8s):
     """Creates the Job, reports its pod finished with the given output, records deletes."""
 
     def __init__(self, output, phase="Succeeded"):

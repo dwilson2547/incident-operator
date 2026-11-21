@@ -3,9 +3,11 @@ import pytest
 
 from incident_operator import evidence
 from incident_operator.evidence import BUDGET_CHARS, collect, render
+from incident_operator.k8s import K8s
 
 POD = {"metadata": {"name": "scraper-abc", "creationTimestamp": "2026-11-01T09:00:00Z"},
-       "spec": {"nodeName": "k8s-worker1", "containers": [{"name": "scraper", "resources": {"limits": {"memory": "512Mi"}}}]},
+       "spec": {"nodeName": "k8s-worker1",
+                "containers": [{"name": "scraper", "resources": {"limits": {"memory": "512Mi"}}}]},
        "status": {"phase": "Running", "startTime": "2026-11-01T09:00:00Z",
                   "conditions": [{"type": "Ready", "status": "False", "reason": "ContainersNotReady"}],
                   "containerStatuses": [{"name": "scraper", "ready": False, "restartCount": 4,
@@ -15,7 +17,9 @@ EVENTS = {"items": [{"lastTimestamp": "2026-11-01T09:05:00Z", "type": "Warning",
                      "message": "Back-off restarting failed container", "count": 12, "metadata": {}}]}
 
 
-class FakeK8s:
+class FakeK8s(K8s):
+    """K8s with canned replies: path -> reply (an exception value is raised); any other path is a 404."""
+
     def __init__(self, routes):
         self.routes, self.calls = routes, []
 
@@ -50,13 +54,15 @@ def test_job_alert_reads_the_job_and_its_newest_pod():
                       "conditions": [{"type": "Failed", "status": "True", "reason": "DeadlineExceeded",
                                       "message": "Job was active longer than specified deadline"}]}}
     older = {**POD, "metadata": {"name": "old", "creationTimestamp": "2026-10-01T00:00:00Z"}}
+    newer = {**POD, "metadata": {"name": "new", "creationTimestamp": "2026-11-01T02:00:00Z"}}
     k = FakeK8s({"/apis/batch/v1/namespaces/postgres/jobs/backup-1": job, "/api/v1/namespaces/postgres/events": EVENTS,
-                 "/api/v1/namespaces/postgres/pods": {"items": [older, {**POD, "metadata": {"name": "new", "creationTimestamp": "2026-11-01T02:00:00Z"}}]},
+                 "/api/v1/namespaces/postgres/pods": {"items": [older, newer]},
                  "/api/v1/namespaces/postgres/pods/new": POD,
                  "/api/v1/namespaces/postgres/pods/new/log?previous=false": "dumping",
                  "/api/v1/namespaces/postgres/pods/new/log?previous=true": "earlier"})
     items = collect(k, {"namespace": "postgres", "job_name": "backup-1"})
-    assert items[0].kind == "job" and "DeadlineExceeded" in items[0].content and "activeDeadlineSeconds=21600" in items[0].content
+    assert items[0].kind == "job" and "DeadlineExceeded" in items[0].content
+    assert "activeDeadlineSeconds=21600" in items[0].content
     assert any(i.source == "pod postgres/new" for i in items)              # the newest pod, not the old one
 
 
@@ -81,7 +87,7 @@ def test_job_with_retries_shows_every_attempt_and_the_first_failure():
     pods = [i.source for i in items if i.kind == "pod" and i.source.startswith("pod ")]
     assert pods == ["pod ob/bk-1", "pod ob/bk-2"]                          # first failure, then the newest
     logs = [i for i in items if i.kind == "logs"]
-    assert len(logs[0].content) <= evidence.LOG_CHARS // 2 + 1 and "already initialized" in logs[1].content
+    assert len(logs[0].content or "") <= evidence.LOG_CHARS // 2 + 1 and "already initialized" in logs[1].content
 
 
 def test_node_exporter_instance_maps_to_a_node_and_tower_to_nothing():
@@ -98,7 +104,8 @@ def test_node_exporter_instance_maps_to_a_node_and_tower_to_nothing():
 
 def test_one_failed_read_keeps_the_rest():
     k = FakeK8s({"/api/v1/namespaces/a/pods/p": POD, "/api/v1/namespaces/a/events": RuntimeError("403 forbidden"),
-                 "/api/v1/namespaces/a/pods/p/log?previous=false": "ok", "/api/v1/namespaces/a/pods/p/log?previous=true": "ok2"})
+                 "/api/v1/namespaces/a/pods/p/log?previous=false": "ok",
+                 "/api/v1/namespaces/a/pods/p/log?previous=true": "ok2"})
     items = collect(k, {"namespace": "a", "pod": "p"})
     ev = next(i for i in items if i.kind == "events")
     assert ev.content is None and "403" in ev.error and items[0].content
@@ -107,11 +114,12 @@ def test_one_failed_read_keeps_the_rest():
 
 def test_whole_set_stays_within_the_budget():
     big = "x" * evidence.LOG_CHARS                   # four full logs: over the whole budget
-    k = FakeK8s({"/api/v1/namespaces/a/pods/p": {**POD, "spec": {**POD["spec"], "containers": [{"name": "c1"}, {"name": "c2"}]},
-                                                 "status": {**POD["status"], "containerStatuses": [
-                                                     {"name": "c1", "restartCount": 1}, {"name": "c2", "restartCount": 1}]}},
-                 "/api/v1/namespaces/a/events": EVENTS,
-                 "/api/v1/namespaces/a/pods/p/log?previous=false": big, "/api/v1/namespaces/a/pods/p/log?previous=true": big})
+    pod = {**POD, "spec": {**POD["spec"], "containers": [{"name": "c1"}, {"name": "c2"}]},
+           "status": {**POD["status"], "containerStatuses": [{"name": "c1", "restartCount": 1},
+                                                             {"name": "c2", "restartCount": 1}]}}
+    k = FakeK8s({"/api/v1/namespaces/a/pods/p": pod, "/api/v1/namespaces/a/events": EVENTS,
+                 "/api/v1/namespaces/a/pods/p/log?previous=false": big,
+                 "/api/v1/namespaces/a/pods/p/log?previous=true": big})
     items = collect(k, {"namespace": "a", "pod": "p", "deployment": "d"})
     assert sum(len(i.content or "") for i in items) <= BUDGET_CHARS
     assert any(i.truncated for i in items)
@@ -121,7 +129,8 @@ def test_whole_set_stays_within_the_budget():
                                                ("statefulset", "statefulsets", "StatefulSet"),
                                                ("daemonset", "daemonsets", "DaemonSet")])
 def test_workload_events_are_asked_for_by_the_object_kind(label, plural, kind):
-    k = FakeK8s({f"/apis/apps/v1/namespaces/a/{plural}/w": {"status": {}}, "/api/v1/namespaces/a/events": {"items": []}})
+    k = FakeK8s({f"/apis/apps/v1/namespaces/a/{plural}/w": {"status": {}},
+                 "/api/v1/namespaces/a/events": {"items": []}})
     collect(k, {"namespace": "a", label: "w"})
     assert k.calls[-1] == ("/api/v1/namespaces/a/events",
                            {"fieldSelector": f"involvedObject.name=w,involvedObject.kind={kind}"})

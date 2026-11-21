@@ -22,6 +22,7 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,9 @@ log = logging.getLogger("incident_operator.library")
 BODY_MAX, BODY_WARN, REMEDIATION_MAX, DESCRIPTION_MAX = 1200, 800, 400, 60
 READ_KINDS = {"alert-objects", "k8s-summary", "k8s-get", "k8s-events", "k8s-logs", "promql", "promql-range", "probe"}
 TARGET_KINDS = {"Pod", "Job", "Deployment", "StatefulSet", "DaemonSet", "Node", "ScrapeJob"}
-PARAM_SOURCE = re.compile(r"^(target\.(name|namespace|kind)|alertLabel:[A-Za-z_][A-Za-z0-9_]*|result:[a-z0-9-]+\.[\w.]+)$")
+PARAM_SOURCE = re.compile(r"^(target\.(name|namespace|kind)"
+                          r"|alertLabel:[A-Za-z_][A-Za-z0-9_]*"
+                          r"|result:[a-z0-9-]+\.[\w.]+)$")
 NAME = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 VERBS = {"DeletePods", "CreateJobFrom", "AnnotateScrapeJob"}   # executor.py; the set grows by code change (design §7.2)
 SCRAPEJOB_ACTIONS = ("run-now", "resume")          # the only annotations AnnotateScrapeJob may set
@@ -238,7 +241,8 @@ def _check_run(run: dict, params: set[str]) -> None:
             raise LoadError("run.object needs kind (Pod, Job, Deployment, StatefulSet, DaemonSet, Node) and name")
     elif kind == "k8s-get":
         if not isinstance(run.get("path"), str) or not run["path"].startswith("/"):
-            raise LoadError("run.path must be an API path such as /apis/<group>/<version>/namespaces/{ns}/<plural>/{name}")
+            raise LoadError("run.path must be an API path such as "
+                            "/apis/<group>/<version>/namespaces/{ns}/<plural>/{name}")
         if not isinstance(run.get("fields"), list) or not run["fields"]:
             raise LoadError("run.fields must list the dotted paths to show, e.g. status.lastRun")
     elif kind == "k8s-logs":
@@ -250,9 +254,8 @@ def _check_run(run: dict, params: set[str]) -> None:
             raise LoadError(f"run.probe must be one of {sorted(PROBES)} (probes are code in the image)")
         if not run.get("node"):
             raise LoadError("run.node is required: the node to probe, e.g. \"{node}\" from target.name")
-    elif kind == "k8s-events":
-        if not any(run.get(k) for k in ("reason", "host", "object")):
-            raise LoadError("run needs at least one of reason, host, object (all events in a namespace is too much)")
+    elif kind == "k8s-events" and not any(run.get(k) for k in ("reason", "host", "object")):
+        raise LoadError("run needs at least one of reason, host, object (all events in a namespace is too much)")
 
 
 def parse_runbook(path: Path, operations: dict[str, Operation], raw: bytes | None = None) -> Runbook:
@@ -378,13 +381,14 @@ class Library:
                 errors[key] = str(e)
                 if p.stem in self.operations:                   # the last good version stays live
                     ops[p.stem] = self.operations[p.stem]
-                elif old := self._saved(key, lambda raw: parse_operation(p, raw)):
+                elif old := self._saved(key, partial(parse_operation, p)):
                     ops[p.stem], errors[key] = old[0], f"{e} (serving the last good version, saved {old[1]})"
         def bad_checks(op: Operation) -> list[str]:     # a fix's checks must be loaded read-only operations
             return [c.op for c in op.pre + op.post if c.op not in ops or ops[c.op].mutating]
         for op in [o for o in ops.values() if o.mutating]:
             if bad := bad_checks(op):
-                errors[f"operations/{Path(op.path).name}"] = f"pre/post checks name unknown or mutating operations: {bad}"
+                errors[f"operations/{Path(op.path).name}"] = (
+                    f"pre/post checks name unknown or mutating operations: {bad}")
                 old = self.operations.get(op.name)
                 if old and old.mutating and not bad_checks(old):
                     ops[op.name] = old
@@ -403,7 +407,7 @@ class Library:
                 old = self.runbooks.get(p.stem)
                 if old and all(n in ops for n in old.precursors + old.operations + list(old.fixes)):
                     rbs[p.stem] = old
-                elif saved := self._saved(key, lambda raw: parse_runbook(p, ops, raw)):
+                elif saved := self._saved(key, partial(parse_runbook, p, ops)):
                     rbs[p.stem], errors[key] = saved[0], f"{e} (serving the last good version, saved {saved[1]})"
         self.operations, self.runbooks, self.errors = ops, rbs, errors
         log.info("library: %d runbooks, %d operations, %d rejected%s", len(rbs), len(ops), len(errors),
@@ -433,6 +437,9 @@ class Library:
         """The matching runbook with the highest priority (ties: by name), or None."""
         found = [r for r in self.runbooks.values() if r.matches(labels)]
         return min(found, key=lambda r: (-r.priority, r.name)) if found else None
+
+    def covers(self, labels: dict[str, str]) -> bool:
+        return self.match(labels) is not None
 
     def describe(self) -> dict:
         return {

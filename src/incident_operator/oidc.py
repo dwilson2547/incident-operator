@@ -1,6 +1,7 @@
 """UI sign-in through authentik: OIDC authorization code flow with PKCE, and a signed session cookie. The
 Copied from gpu-scheduler's dashboard (gpu_scheduler/oidc.py), itself scrape-job-manager's in one module: no user
-table, the verified claims become the session cookie directly. Who may sign in is decided in authentik (a group binding on the application), not here.
+table, the verified claims become the session cookie directly. Who may sign in is decided in authentik (a group
+binding on the application), not here.
 
 State, nonce, the PKCE verifier and the page to return to ride in a short-lived HttpOnly cookie scoped to the
 callback path. The session is payload + HMAC-SHA256 keyed by the client secret, so rotating it signs everyone out.
@@ -41,21 +42,24 @@ class Provider:
         self.issuer = issuer.rstrip("/")
         self.client_id = client_id
         self.client_secret = client_secret
-        self._meta: dict | None = None
-        self._jwks: jwt.PyJWKClient | None = None
+        self._discovered: tuple[dict, jwt.PyJWKClient] | None = None
         self._lock = threading.Lock()
 
     def metadata(self) -> dict:
+        return self._load()[0]
+
+    def _load(self) -> tuple[dict, jwt.PyJWKClient]:
+        """The discovery document and a key client for its JWKS, fetched once."""
         with self._lock:
-            if self._meta is None:
+            if self._discovered is None:
                 r = httpx.get(self.issuer + "/.well-known/openid-configuration", timeout=10)
                 r.raise_for_status()
-                self._meta = r.json()
+                meta = r.json()
                 # Named User-Agent: PyJWKClient fetches with urllib, and Cloudflare (in front of auth.danwils.com)
                 # 403s the default Python-urllib one.
-                self._jwks = jwt.PyJWKClient(self._meta["jwks_uri"], cache_keys=True,
-                                             headers={"User-Agent": USER_AGENT})
-            return self._meta
+                self._discovered = meta, jwt.PyJWKClient(meta["jwks_uri"], cache_keys=True,
+                                                         headers={"User-Agent": USER_AGENT})
+            return self._discovered
 
     def exchange(self, code: str, verifier: str, redirect_uri: str) -> dict:
         r = httpx.post(self.metadata()["token_endpoint"], timeout=15,
@@ -69,13 +73,13 @@ class Provider:
 
     def verify(self, id_token: str, nonce: str) -> dict:
         try:
-            self.metadata()
-            key = self._jwks.get_signing_key_from_jwt(id_token).key
+            meta, jwks = self._load()
+            key = jwks.get_signing_key_from_jwt(id_token).key
             claims = jwt.decode(
                 id_token, key, algorithms=["RS256", "ES256"],
                 # authentik's issuer keeps its trailing slash: compare against the discovery document's, not the
                 # configured URL trimmed.
-                audience=self.client_id, issuer=self._meta["issuer"],
+                audience=self.client_id, issuer=meta["issuer"],
                 options={"require": ["exp", "iat", "iss", "aud", "sub"]})
         except jwt.PyJWTError as exc:
             log.warning("oidc: ID token rejected: %s", exc)

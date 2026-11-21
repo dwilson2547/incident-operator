@@ -9,7 +9,7 @@ import pytest
 
 from incident_operator import db
 
-URL = os.environ.get("INCIDENT_OPERATOR_TEST_DATABASE_URL")
+URL = os.environ.get("INCIDENT_OPERATOR_TEST_DATABASE_URL", "")
 needs_pg = pytest.mark.skipif(not URL, reason="INCIDENT_OPERATOR_TEST_DATABASE_URL not set")
 
 

@@ -131,13 +131,16 @@ RELATED_LINES = 10
 
 def alert_subject(labels: dict) -> str:
     """The labels that say what an alert is about: the most specific object, and what it belongs to."""
-    picked = [next((k for k in SUBJECT_LABELS if labels.get(k)), None), next((k for k in GROUP_LABELS if labels.get(k)), None)]
+    picked = [next((k for k in SUBJECT_LABELS if labels.get(k)), None),
+              next((k for k in GROUP_LABELS if labels.get(k)), None)]
     return " ".join(f"{k}={labels[k]}" for k in picked if k)
 
 
 def _span(seconds: float) -> str:
     minutes = round(abs(seconds) / 60)
-    return f"{minutes}m" if minutes < 120 else f"{round(minutes / 60)}h" if minutes < 2880 else f"{round(minutes / 1440)}d"
+    if minutes < 120:
+        return f"{minutes}m"
+    return f"{round(minutes / 60)}h" if minutes < 2880 else f"{round(minutes / 1440)}d"
 
 
 def related_block(related: dict) -> str:
@@ -194,7 +197,8 @@ def menu_text(runbook: Runbook, library_ops: dict) -> tuple[list[str], str]:
 def first_messages(incident: dict, runbook: Runbook, target: dict | None, precursors: list[Result],
                    menu: str, primer: str, related: str = "", rounds: int = MAX_ROUNDS - 1,
                    budget: int = PRECURSOR_CHARS) -> list[dict]:
-    system = INVESTIGATE_SYSTEM + ("\n\n" + primer if primer else "") + f"\n\nRunbook ({runbook.name}):\n" + runbook.body
+    system = (INVESTIGATE_SYSTEM + ("\n\n" + primer if primer else "")
+              + f"\n\nRunbook ({runbook.name}):\n" + runbook.body)
     user = (alert_block(incident, target) + ("\n\n" + related if related else "")
             + "\n\nEvidence collected when the incident opened:\n\n" + render_results(precursors, budget)
             + "\n\nChecks you can ask for:\n" + menu

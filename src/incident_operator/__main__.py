@@ -27,6 +27,8 @@ from .ops import Runner
 from .settings import Env
 from .triage import Config, Engine, GpuScheduler
 
+log = logging.getLogger("incident_operator")
+
 
 class _Server(uvicorn.Server):
     """Two servers share one process, so signals are handled once, by main(), not by each server (each would replace
@@ -53,8 +55,8 @@ def main() -> None:
 
     logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.info("triage: %s, fallback %s after %ss; email %s", cfg.model, cfg.fallback, cfg.fallback_after_seconds,
-                 f"to {', '.join(smtp.to)}" if smtp.usable else "off")
+    log.info("triage: %s, fallback %s after %ss; email %s", cfg.model, cfg.fallback, cfg.fallback_after_seconds,
+             f"to {', '.join(smtp.to)}" if smtp.usable else "off")
     conn = db.connect(url)
     db.migrate(conn)
     library = Library(runbooks_dir, operations_dir, store=db.LastGood(conn))

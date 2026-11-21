@@ -1,23 +1,23 @@
-"""Intake, the triage engine and the email, with a fake gpu-scheduler, a fake Kubernetes and a real local SMTP server."""
+"""Intake, the triage engine and the email, with a fake gpu-scheduler, a fake Kubernetes and a real local SMTP
+server."""
 import uuid
 from unittest.mock import ANY
 
-import pytest
 from conftest import URL, alert, needs_pg
 from fastapi.testclient import TestClient
+from test_evidence import EVENTS, POD, FakeK8s
+from testconfig import smtp_config, triage_config, ui_settings
 
 from incident_operator import db
 from incident_operator.app import create_ui_app, create_webhook_app
 from incident_operator.notify import Notifier, compose
 from incident_operator.ops import Runner
-from incident_operator.triage import PROMPT_VERSION, Engine, build_messages
-from test_evidence import EVENTS, POD, FakeK8s
-from testconfig import smtp_config, triage_config, ui_settings
+from incident_operator.triage import PROMPT_VERSION, Engine, GpuScheduler, build_messages
 
 pytestmark = needs_pg
 
 
-class FakeGpu:
+class FakeGpu(GpuScheduler):
     def __init__(self):
         self.jobs, self.submitted, self.down = {}, [], False
 
@@ -74,7 +74,7 @@ def test_full_triage_flow(conn, tmp_path):
     e = engine(conn, gpu, mail, tmp_path)
     inc_id, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
     assert e.step() == 1                                                          # evidence + submit
-    inc = db.get_incident(conn, inc_id)
+    inc = db.incident(conn, inc_id)
     assert inc["status"] == "triaging" and [x["kind"] for x in inc["evidence"]] == ["pod", "events", "logs", "logs"]
     (turn,) = inc["turns"]
     assert turn["prompt_version"] == PROMPT_VERSION and turn["fallback"] == ["gemma4-26b-a4b"]
@@ -84,7 +84,7 @@ def test_full_triage_flow(conn, tmp_path):
     assert e.step() == 0                                                          # still queued: nothing moves
     gpu.finish()
     assert e.step() == 2                                                          # analysed, then mailed
-    inc = db.get_incident(conn, inc_id)
+    inc = db.incident(conn, inc_id)
     assert (inc["status"], inc["analysis_model"], inc["analysis_worker"]) == ("analysed", "gemma4-26b-a4b", "mac-mini")
     assert inc["turns"][0]["ran_model"] == "gemma4-26b-a4b" and inc["notified_at"] is not None
     assert len(mail.sent) == 1 and e.step() == 0                                   # mailed once
@@ -98,7 +98,7 @@ def test_failed_job_is_reported(conn, tmp_path):
     for j in gpu.jobs.values():
         j.update(status="failed", error="LM Studio refused the job")
     e.step()
-    inc = db.get_incident(conn, inc_id)
+    inc = db.incident(conn, inc_id)
     assert inc["status"] == "triage_failed" and "refused" in inc["error"] and len(mail.sent) == 1
 
 
@@ -108,10 +108,10 @@ def test_unreachable_gpu_scheduler_leaves_the_incident_for_the_next_pass(conn, t
     e = engine(conn, gpu, mail, tmp_path)
     inc_id, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
     assert e.step() == 0
-    inc = db.get_incident(conn, inc_id)
+    inc = db.incident(conn, inc_id)
     assert inc["status"] == "new" and inc["evidence"] == []                       # no half-recorded attempt
     gpu.down = False
-    assert e.step() == 1 and len(db.get_incident(conn, inc_id)["evidence"]) == 4  # collected once
+    assert e.step() == 1 and len(db.incident(conn, inc_id)["evidence"]) == 4  # collected once
 
 
 def test_build_messages_shows_labels_and_annotations():
@@ -127,7 +127,7 @@ def test_email_composition(conn):
     inc_id, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
     db.set_status(conn, inc_id, "analysed", analysis="Where it failed: the scraper.", analysis_model="qwen35-9b",
                   analysis_worker="ainode")
-    msg = compose(db.get_incident(conn, inc_id), smtp_config(sender="a@b", to=["c@d"], public_url="http://io.local"))
+    msg = compose(db.incident(conn, inc_id), smtp_config(sender="a@b", to=["c@d"], public_url="http://io.local"))
     assert msg["Subject"] == "[triage] KubePodCrashLooping · namespace=gyopart pod=x"
     body = msg.get_content()
     assert "Where it failed: the scraper." in body and "Answered by qwen35-9b on ainode" in body
@@ -152,7 +152,7 @@ def test_email_goes_through_smtp(conn):
         inc_id, _ = db.record_firing(conn, alert())
         db.set_status(conn, inc_id, "analysed", analysis="ok")
         Notifier(smtp_config(host="127.0.0.1", port=port, starttls=False,
-                             sender="io@x", to=["me@x"])).send_incident(db.get_incident(conn, inc_id))
+                             sender="io@x", to=["me@x"])).send_incident(db.incident(conn, inc_id))
     finally:
         ctl.stop()
     assert got and got[0].rcpt_tos == ["me@x"] and b"[triage] KubePodCrashLooping" in got[0].content
@@ -208,7 +208,9 @@ def test_flapping_alert_is_triaged_and_mailed_once(conn, tmp_path):
     gpu, mail = FakeGpu(), Mailbox()
     e = engine(conn, gpu, mail, tmp_path)
     first, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
-    e.step(); gpu.finish(); e.step()
+    e.step()
+    gpu.finish()
+    e.step()
     for _ in range(5):                                                            # resolve, fire, resolve, ...
         db.record_resolved(conn, alert(status="resolved"))
         db.record_firing(conn, alert(namespace="gyopart", pod="x"))
@@ -217,7 +219,7 @@ def test_flapping_alert_is_triaged_and_mailed_once(conn, tmp_path):
     with TestClient(create_ui_app(URL, ui_settings())) as ui:
         d = ui.get("/api/incidents").json()
     assert [(i["id"], i["repeats"], i["repeats_open"]) for i in d["incidents"]] == [(first, 5, 1)]
-    assert len(db.get_incident(conn, first)["repeats"]) == 5
+    assert len(db.incident(conn, first)["repeats"]) == 5
 
 
 def test_cronjob_runs_under_new_names_are_repeats(conn, tmp_path):
@@ -227,7 +229,7 @@ def test_cronjob_runs_under_new_names_are_repeats(conn, tmp_path):
     e.step()
     second, _ = db.record_firing(conn, alert("r2", namespace="gyopart", job_name="backup-29886271"))
     e.step()
-    inc = db.get_incident(conn, second)
+    inc = db.incident(conn, second)
     assert (inc["status"], inc["repeat_of"]) == ("repeat", first) and len(gpu.submitted) == 1
 
 
@@ -249,14 +251,14 @@ def test_hourly_cap_holds_the_rest_and_skips_long_resolved(conn, tmp_path):
     e.cfg.max_per_hour = 2
     ids = [db.record_firing(conn, alert(f"s{k}", namespace="gyopart", pod=f"app{k}-x"))[0] for k in range(4)]
     e.step()
-    assert [db.get_incident(conn, i)["status"] for i in ids] == ["triaging", "triaging", "new", "new"]
+    assert [db.incident(conn, i)["status"] for i in ids] == ["triaging", "triaging", "new", "new"]
     # one waiting incident resolves long before there is room again: dropped, the other still waits
     conn.execute("UPDATE incidents SET alert_resolved_at = now() - interval '2 hours' WHERE id = %s", (ids[2],))
     e.step()
-    assert [db.get_incident(conn, i)["status"] for i in ids[2:]] == ["skipped", "new"]
+    assert [db.incident(conn, i)["status"] for i in ids[2:]] == ["skipped", "new"]
     conn.execute("UPDATE model_turns SET submitted_at = now() - interval '2 hours'")    # the hour passes
     e.step()
-    assert db.get_incident(conn, ids[3])["status"] == "triaging" and len(gpu.submitted) == 3
+    assert db.incident(conn, ids[3])["status"] == "triaging" and len(gpu.submitted) == 3
 
 
 def test_migrates_a_phase_1_database(conn):
@@ -272,7 +274,9 @@ def test_migrates_a_phase_1_database(conn):
 @needs_pg
 def test_metrics_for_the_operators_own_alerts(conn):
     from types import SimpleNamespace
+
     from fastapi.testclient import TestClient
+
     from incident_operator.app import create_webhook_app
     db.record_firing(conn, alert("a"))
     conn.execute("UPDATE incidents SET first_seen = now() - interval '2 hours'")
@@ -281,7 +285,8 @@ def test_metrics_for_the_operators_own_alerts(conn):
     engine = SimpleNamespace(last_pass=None)
     with TestClient(create_webhook_app(conn.info.dsn, engine)) as c:
         text = c.get("/metrics").text
-        assert 'incident_operator_incidents{status="new"} 1' in text and 'incident_operator_incidents{status="analysed"} 1' in text
+        assert 'incident_operator_incidents{status="new"} 1' in text
+        assert 'incident_operator_incidents{status="analysed"} 1' in text
         waiting = float(next(line.split()[1] for line in text.splitlines()
                              if line.startswith("incident_operator_oldest_waiting_seconds ")))
         assert 7100 < waiting < 7300                                        # the new one, 2 h old

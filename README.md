@@ -189,9 +189,10 @@ Optional local-run switches, never set by the chart:
 ## Develop
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
+python3 -m venv .venv && .venv/bin/pip install -e '.[test,lint]'
 docker run -d --name io-pg -e POSTGRES_PASSWORD=dev -p 127.0.0.1:55444:5432 postgres:17
 PGPASSWORD=dev INCIDENT_OPERATOR_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55444/postgres .venv/bin/pytest -q
+.venv/bin/ruff check src tests && .venv/bin/pyright      # CI runs both; config in pyproject.toml
 ./start.sh          # the service with local.env: :8090 (UI) / :8091 (webhook), evidence and email off
 ./kill.sh
 ```

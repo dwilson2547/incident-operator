@@ -27,8 +27,9 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from . import db, evidence, fixes, investigate
 from .library import Library, resolve_target
@@ -114,7 +115,7 @@ def build_messages(incident: dict, evidence_text: str, primer: str, related: str
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def fits_fallback(messages: list[dict], cfg: "Config") -> bool:
+def fits_fallback(messages: list[dict], cfg: Config) -> bool:
     return estimate_tokens(messages) <= cfg.fallback_max_prompt_tokens
 
 
@@ -155,6 +156,12 @@ class Engine:
         self.stopping = False
         self.last_pass: float | None = None      # time of the last pass that completed, for /metrics
 
+    @property
+    def _lib(self) -> Library:
+        """The library, on the runbook path: only reached through a runbook it matched."""
+        assert self.library is not None
+        return self.library
+
     def _submit(self, inc: dict, messages: list[dict], schema: dict | None = None, tokens: int | None = None) -> str:
         pin = {"model": inc["rerun_model"]} if inc.get("rerun_model") else {}
         return self.gpu.submit(messages, schema, tokens, **pin)
@@ -173,8 +180,10 @@ class Engine:
         """One pass of each stage. Returns how many things moved."""
         if self.library:
             self.library.refresh()
-        return self.start_new() + self.start_reruns() + self.poll() + (fixes.step(self.conn, self.library, self.runner) if self.library
-                                                 else 0) + self.notify()
+        n = self.start_new() + self.start_reruns() + self.poll()
+        if self.library:
+            n += fixes.step(self.conn, self.library, self.runner)
+        return n + self.notify()
 
     def start_new(self) -> int:
         n = 0
@@ -188,7 +197,7 @@ class Engine:
                 n += 1
                 continue
             resolved = inc["alert_resolved_at"]
-            if resolved and (datetime.now(timezone.utc) - resolved).total_seconds() > self.cfg.skip_resolved_after_seconds:
+            if resolved and (datetime.now(UTC) - resolved).total_seconds() > self.cfg.skip_resolved_after_seconds:
                 rb = self.library.match(inc["labels"]) if self.library else None
                 db.set_status(self.conn, inc["id"], "skipped", runbook=rb.name if rb else None,
                               error="Resolved before its turn: the hourly triage limit was reached.")
@@ -224,7 +233,7 @@ class Engine:
         n = 0
         limits = {m["name"]: m.get("max_prompt_tokens") for m in self.cfg.rerun_models}
         for inc in db.incidents_with_status(self.conn, "rerun", limit=200):
-            stored = [e for e in db.get_incident(self.conn, inc["id"])["evidence"] if e["trigger"] not in ("pre", "post")]
+            stored = [e for e in db.incident(self.conn, inc["id"])["evidence"] if e["trigger"] not in ("pre", "post")]
             rb = self.library.match(inc["labels"]) if self.library else None
             related = self._related(inc)
             if rb:
@@ -237,7 +246,8 @@ class Engine:
                 tokens, status = self.cfg.investigate_max_new_tokens, "investigating"
                 turn = dict(session="investigation", prompt_version=investigate.PROMPT_VERSION, json_schema=schema)
             else:
-                items = [evidence.Item(e["kind"], e["source"], e["content"], e["truncated"], e["error"]) for e in stored]
+                items = [evidence.Item(e["kind"], e["source"], e["content"], e["truncated"], e["error"])
+                         for e in stored]
                 messages = build_messages(inc, evidence.render(items), self.cfg.primer(), related)
                 schema, tokens, status = None, None, "triaging"
                 turn = dict(session="triage", prompt_version=PROMPT_VERSION)
@@ -288,7 +298,7 @@ class Engine:
     def _run_ops(self, names: list[str], target, labels, earlier: dict[str, Result]) -> list[Result]:
         out = []
         for name in names:
-            r = self.runner.run(self.library.operations[name], target, labels, earlier)
+            r = self.runner.run(self._lib.operations[name], target, labels, earlier)
             earlier[name] = r
             out.append(r)
         return out
@@ -305,7 +315,7 @@ class Engine:
             log.warning("incident %s: target resolution failed: %s", inc["id"], e)
             target = None
         precursors = self._run_ops(rb.precursors, target, inc["labels"], {})
-        menu, menu_txt = investigate.menu_text(rb, self.library.operations)
+        menu, menu_txt = investigate.menu_text(rb, self._lib.operations)
         messages = investigate.first_messages(inc, rb, target, precursors, menu_txt, self.cfg.primer(),
                                               self._related(inc))
         schema = investigate.investigation_schema(menu, final=investigate.MAX_ROUNDS <= 1)
@@ -325,8 +335,9 @@ class Engine:
     def _runbook_turn_done(self, turn: dict, job: dict) -> int:
         res = job.get("result") or {}
         output = res.get("json")
-        done = dict(status="done", result=res, ran_model=job.get("ran_model"), worker=job.get("worker"), output=output)
-        inc = db.get_incident(self.conn, turn["incident_id"])
+        done: dict[str, Any] = dict(status="done", result=res, ran_model=job.get("ran_model"), worker=job.get("worker"),
+                                    output=output)
+        inc = db.incident(self.conn, turn["incident_id"])
         if not isinstance(output, dict):
             limit = self.cfg.investigate_max_new_tokens
             cut_off = (res.get("output_tokens") or 0) >= limit
@@ -353,8 +364,8 @@ class Engine:
             db.finish_turn(self.conn, turn["id"], **done)
             rb = self.library.runbooks.get(inc["runbook"]) if self.library else None
             name = output.get("operation")
-            if rb and name in rb.fixes and name in self.library.operations:   # the schema allows only these or "none"
-                fixes.propose(self.conn, inc, rb, self.library.operations[name])
+            if rb and name in rb.fixes and name in self._lib.operations:   # the schema allows only these or "none"
+                fixes.propose(self.conn, inc, rb, self._lib.operations[name])
                 log.info("incident %s: proposed fix %s (%s)", inc["id"], name, rb.fixes[name])
             db.set_status(self.conn, inc["id"], "analysed", advice=output,
                           analysis=investigate.render_analysis(inc["findings"], output),
@@ -368,7 +379,7 @@ class Engine:
                           analysis_model=job.get("ran_model") or turn["model"], analysis_worker=job.get("worker"))
             return 1
         n = turn["turn"]
-        menu, _ = investigate.menu_text(rb, self.library.operations)
+        menu, _ = investigate.menu_text(rb, self._lib.operations)
         asked = list(dict.fromkeys(output.get("requests") or []))
         # Checks listed with "done" still run while rounds remain: seen in prod (a 9B listed the log it needed and
         # finished anyway). Read-only, so running one too many costs a turn, never a change.
@@ -392,7 +403,7 @@ class Engine:
             log.info("incident %s: turn %d asked for %s", inc["id"], n, asked)
             return 1
         findings = output.get("findings") or {}
-        fix_names, fixes_txt = investigate.fixes_text(rb, self.library.operations)
+        fix_names, fixes_txt = investigate.fixes_text(rb, self._lib.operations)
         # Built again here, not copied from the first turn: alerts that came in during the investigation count too.
         messages = investigate.remediation_messages(inc, rb, inc["target"], findings, self.cfg.primer(), fixes_txt,
                                                     self._related(inc))
@@ -414,7 +425,7 @@ class Engine:
             return 0
         n = 0
         for inc in db.to_notify(self.conn):
-            full = db.get_incident(self.conn, inc["id"])
+            full = db.incident(self.conn, inc["id"])
             try:
                 self.notifier.send_incident(full)
             except Exception as e:
@@ -424,7 +435,7 @@ class Engine:
             n += 1
         for run in db.op_runs_to_notify(self.conn):
             try:
-                self.notifier.send_fix(run, db.get_incident(self.conn, run["incident_id"]))
+                self.notifier.send_fix(run, db.incident(self.conn, run["incident_id"]))
             except Exception as e:
                 log.warning("email for fix run %s failed: %s", run["id"], e)
                 continue
@@ -445,7 +456,6 @@ class Engine:
 
 
 def _jsonable(v):
-    import json
     try:
         json.dumps(v)
         return v

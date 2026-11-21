@@ -1,20 +1,19 @@
 """Phase 3: fixes (mutating operations) from proposal through approval, pre-checks, the executor and post-checks."""
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 from conftest import alert, needs_pg
 from fastapi.testclient import TestClient
+from test_evidence import FakeK8s
+from test_runbooks import CHART, FINDINGS, FakeProm, ScriptedGpu, load
+from testconfig import smtp_config, triage_config, ui_settings
 
 from incident_operator import db, executor, fixes
 from incident_operator.app import create_ui_app
 from incident_operator.library import Library
-from incident_operator.ops import Result, Runner
+from incident_operator.ops import Prometheus, Result, Runner
 from incident_operator.triage import Engine
-from test_evidence import FakeK8s
-from testconfig import smtp_config, triage_config, ui_settings
-from test_runbooks import CHART, FINDINGS, FakeProm, ScriptedGpu, load
 
 NODE = {"metadata": {"name": "k8s-worker1"},
         "status": {"addresses": [{"type": "InternalIP", "address": "192.168.0.36"}],
@@ -89,9 +88,16 @@ def cluster(pods=1, ds_unavailable=None):
     return Cluster({
         "/api/v1/nodes": {"items": [NODE]}, "/api/v1/nodes/k8s-worker1": NODE,
         "/api/v1/events": {"items": []}, "/api/v1/namespaces/default/events": {"items": []},
-        "/api/v1/namespaces/kube-system/pods": {"items": [{"metadata": {"name": f"csi-nfs-node-{i}"}} for i in range(pods)]},
+        "/api/v1/namespaces/kube-system/pods": {
+            "items": [{"metadata": {"name": f"csi-nfs-node-{i}"}} for i in range(pods)]},
         "/apis/apps/v1/namespaces/kube-system/daemonsets/csi-nfs-node": ds,
     })
+
+
+def op_run(conn, run_id: int) -> dict:
+    run = db.get_op_run(conn, run_id)
+    assert run is not None
+    return run
 
 
 def setup(conn, tmp_path, replies=None, k8s=None, lib=None):
@@ -101,9 +107,8 @@ def setup(conn, tmp_path, replies=None, k8s=None, lib=None):
     mail = Mailbox()
     primer = tmp_path / "primer.md"
     primer.write_text("")
-    e = Engine(conn, triage_config(primer_path=str(primer)), k8s, ScriptedGpu(replies or [
-        {"action": "done", "requests": [], "reason": "r", "findings": FINDINGS}, ADVICE_FIX]), mail,
-        runner, library=lib or load(CHART))
+    gpu = ScriptedGpu(replies or [{"action": "done", "requests": [], "reason": "r", "findings": FINDINGS}, ADVICE_FIX])
+    e = Engine(conn, triage_config(primer_path=str(primer)), k8s, gpu, mail, runner, library=lib or load(CHART))
     return e, k8s, runner, mail
 
 
@@ -115,7 +120,7 @@ def analysed(conn, e):
     inc_id, _ = db.record_firing(conn, wedge_alert())
     for _ in range(4):
         e.step()
-    return db.get_incident(conn, inc_id)
+    return db.incident(conn, inc_id)
 
 
 def approve(conn, run_id, settings=None):
@@ -172,6 +177,7 @@ def test_proposed_approved_executed_and_verified(conn, tmp_path):
     e, k8s, runner, mail = setup(conn, tmp_path)
     inc = analysed(conn, e)
     assert inc["status"] == "analysed" and "Proposed fix: restart-csi-nfs-node" in inc["analysis"]
+    assert isinstance(e.gpu, ScriptedGpu)
     remediation = e.gpu.submitted[-1]
     assert remediation[1]["properties"]["operation"]["enum"] == ["restart-csi-nfs-node", "none"]
     assert "restart-csi-nfs-node:" in remediation[0][0]["content"]
@@ -180,28 +186,28 @@ def test_proposed_approved_executed_and_verified(conn, tmp_path):
     assert "Proposed fix, waiting for your approval" in _mail_text(e, inc)
 
     e.step()                                                          # nothing runs without approval
-    assert db.get_op_run(conn, run["id"])["status"] == "proposed" and not k8s.deleted
+    assert op_run(conn, run["id"])["status"] == "proposed" and not k8s.deleted
 
     assert approve(conn, run["id"]).status_code == 200
     assert approve(conn, run["id"]).status_code == 409                # once
     e.step()                                                          # pre-checks against a fresh probe
-    r = db.get_op_run(conn, run["id"])
+    r = op_run(conn, run["id"])
     assert r["status"] == "ready" and r["decided_by"] == "anonymous (local)" and r["checks"].count("pass:") == 4
-    pre = [x for x in db.get_incident(conn, inc["id"])["evidence"] if x["trigger"] == "pre"]
+    pre = [x for x in db.incident(conn, inc["id"])["evidence"] if x["trigger"] == "pre"]
     assert [x["operation"] for x in pre] == ["nfs-dstate", "nodes-wedged-now", "tower-load-now"]   # one probe for two
 
     lib = Library(None, str(CHART / "operations"))
     assert executor.step(conn, lib, k8s) == 1
     assert k8s.deleted == ["/api/v1/namespaces/kube-system/pods/csi-nfs-node-0"]
-    r = db.get_op_run(conn, run["id"])
+    r = op_run(conn, run["id"])
     assert r["status"] == "settling" and "deleted pod kube-system/csi-nfs-node-0" in r["result"]
 
     e.step()
-    assert db.get_op_run(conn, run["id"])["status"] == "settling"     # waits out `settle`
+    assert op_run(conn, run["id"])["status"] == "settling"     # waits out `settle`
     conn.execute("UPDATE op_runs SET post_due_at = now() WHERE id = %s", (run["id"],))
     runner.dstate = CLEAR
     e.step()
-    r = db.get_op_run(conn, run["id"])
+    r = op_run(conn, run["id"])
     assert r["status"] == "succeeded" and r["finished_at"] and "FAIL" not in r["checks"]
     assert [f["status"] for f in mail.fixes] == ["succeeded"]
     e.step()
@@ -214,11 +220,12 @@ def test_proposed_approved_executed_and_verified(conn, tmp_path):
 def test_post_check_failure_is_reported(conn, tmp_path):
     e, k8s, runner, mail = setup(conn, tmp_path)
     run = analysed(conn, e)["fixes"][0]
-    approve(conn, run["id"]); e.step()
+    approve(conn, run["id"])
+    e.step()
     executor.step(conn, Library(None, str(CHART / "operations")), k8s)
     conn.execute("UPDATE op_runs SET post_due_at = now()")
     e.step()                                                          # the mounts came back: Tower's side
-    r = db.get_op_run(conn, run["id"])
+    r = op_run(conn, run["id"])
     assert r["status"] == "post_failed" and "FAIL: nfs-dstate expects mount_nfs_dstate_total == 0" in r["checks"]
     assert mail.fixes[-1]["status"] == "post_failed"
 
@@ -228,8 +235,9 @@ def test_pre_check_refuses_when_the_wedge_has_cleared(conn, tmp_path):
     e, k8s, runner, mail = setup(conn, tmp_path)
     run = analysed(conn, e)["fixes"][0]
     runner.dstate = CLEAR
-    approve(conn, run["id"]); e.step()
-    r = db.get_op_run(conn, run["id"])
+    approve(conn, run["id"])
+    e.step()
+    r = op_run(conn, run["id"])
     assert r["status"] == "refused" and "FAIL" in r["checks"] and not k8s.deleted
     assert mail.fixes[-1]["status"] == "refused"
 
@@ -243,9 +251,11 @@ def test_pre_check_refuses_when_the_wedge_has_cleared(conn, tmp_path):
 def test_pre_check_refuses_when_the_server_is_the_problem(conn, tmp_path, wedged, tower, why):
     e, k8s, runner, mail = setup(conn, tmp_path)
     run = analysed(conn, e)["fixes"][0]
+    assert isinstance(runner.prom, ClusterProm)
     runner.prom.wedged, runner.prom.tower = wedged, tower
-    approve(conn, run["id"]); e.step()
-    r = db.get_op_run(conn, run["id"])
+    approve(conn, run["id"])
+    e.step()
+    r = op_run(conn, run["id"])
     assert r["status"] == "refused" and why in r["checks"] and not k8s.deleted
 
 
@@ -253,16 +263,19 @@ def test_pre_check_refuses_when_the_server_is_the_problem(conn, tmp_path, wedged
 def test_limits_and_changed_operation_refuse(conn, tmp_path):
     e, k8s, runner, mail = setup(conn, tmp_path)
     first = analysed(conn, e)["fixes"][0]
-    approve(conn, first["id"]); e.step()
-    assert db.get_op_run(conn, first["id"])["status"] == "ready"
+    approve(conn, first["id"])
+    e.step()
+    assert op_run(conn, first["id"])["status"] == "ready"
     second = db.add_op_run(conn, first["incident_id"], first["operation"], first["op_rev"], first["params"],
                            "approve", "proposed")
-    approve(conn, second); e.step()
-    assert db.get_op_run(conn, second)["error"].startswith("limit: restart-csi-nfs-node already ran 1 time")
+    approve(conn, second)
+    e.step()
+    assert op_run(conn, second)["error"].startswith("limit: restart-csi-nfs-node already ran 1 time")
     third = db.add_op_run(conn, first["incident_id"], first["operation"], "0ldrev", {"node": "k8s-worker2"},
                           "approve", "proposed")
-    approve(conn, third); e.step()
-    assert "changed since it was proposed" in db.get_op_run(conn, third)["error"]
+    approve(conn, third)
+    e.step()
+    assert "changed since it was proposed" in op_run(conn, third)["error"]
 
 
 @needs_pg
@@ -274,11 +287,11 @@ def test_executor_refuses_what_the_operation_does_not_allow(conn, tmp_path):
     for params in ({"node": "k8s-worker1 --all"}, {"node": "k8s-worker1", "namespace": "default"}):
         rid = db.add_op_run(conn, inc_id, op.name, op.rev, params, "approve", "ready")
         executor.step(conn, lib, cluster())
-        assert db.get_op_run(conn, rid)["status"] == "failed"
+        assert op_run(conn, rid)["status"] == "failed"
     k8s = cluster(pods=2)                                             # selector matches more than maxPods
     rid = db.add_op_run(conn, inc_id, op.name, op.rev, {"node": "k8s-worker1"}, "approve", "ready")
     executor.step(conn, lib, k8s)
-    r = db.get_op_run(conn, rid)
+    r = op_run(conn, rid)
     assert r["status"] == "failed" and "more than maxPods=1" in r["error"] and not k8s.deleted
 
 
@@ -326,7 +339,7 @@ SJOB = "/apis/scrape.danwils.com/v1alpha1/namespaces/gyopart/scrapejobs/site-a"
 SITE = {"target": {"kind": "ScrapeJob", "name": "site-a", "namespace": "gyopart"}, "labels": {}}
 
 
-class JobStartProm:
+class JobStartProm(Prometheus):
     """Prometheus for the post-checks: `started` Jobs of the ScrapeJob."""
 
     def __init__(self, started):
@@ -365,7 +378,8 @@ def test_annotate_verb_allows_only_its_actions(tmp_path):
 @pytest.mark.parametrize("which, status, passes", [
     ("run", {"phase": "Degraded", "lastRun": {"exitCode": 1}}, True),
     ("run", {"phase": "Healthy", "stale": True}, True),
-    ("run", {"phase": "Degraded", "currentRun": {"trigger": "scheduled", "nextAttemptAt": "x"}}, True),    # waiting retry
+    ("run", {"phase": "Degraded",                                                 # waiting retry
+             "currentRun": {"trigger": "scheduled", "nextAttemptAt": "x"}}, True),
     ("run", {"phase": "Suspended"}, False),                                       # that's resume
     ("run", {"phase": "Disabled"}, False),                                        # the operator would run it anyway
     ("run", {"phase": "Degraded", "currentRun": {"k8sJob": "site-a-1-1"}}, False),
@@ -396,15 +410,17 @@ def test_executor_annotates_only_where_allowed(conn):
     op = lib.operations["run-scrapejob-now"]
     inc_id, _ = db.record_firing(conn, alert("s1", alertname="ScrapeJobFailing"))
     k8s = cluster()
-    rid = db.add_op_run(conn, inc_id, op.name, op.rev, {"namespace": "gyopart-dev", "name": "site-a"}, "approve", "ready")
+    rid = db.add_op_run(conn, inc_id, op.name, op.rev, {"namespace": "gyopart-dev", "name": "site-a"},
+                        "approve", "ready")
     executor.step(conn, lib, k8s)
-    assert db.get_op_run(conn, rid)["status"] == "failed" and not k8s.patched
+    assert op_run(conn, rid)["status"] == "failed" and not k8s.patched
     rid = db.add_op_run(conn, inc_id, op.name, op.rev, {"namespace": "gyopart", "name": "site-a"}, "approve", "ready")
     executor.step(conn, lib, k8s)
-    assert db.get_op_run(conn, rid)["status"] == "settling"
-    assert k8s.patched == [(SJOB, {"metadata": {"annotations": {"scrape.danwils.com/run-now": f"incident-operator-{rid}"}}})]
+    assert op_run(conn, rid)["status"] == "settling"
+    want = {"metadata": {"annotations": {"scrape.danwils.com/run-now": f"incident-operator-{rid}"}}}
+    assert k8s.patched == [(SJOB, want)]
 
 
 def _mail_text(e, inc):
-    from incident_operator.notify import SmtpConfig, compose
-    return compose(db.get_incident(e.conn, inc["id"]), smtp_config(sender="a@b", to=["c@d"])).get_content()
+    from incident_operator.notify import compose
+    return compose(db.incident(e.conn, inc["id"]), smtp_config(sender="a@b", to=["c@d"])).get_content()

@@ -23,11 +23,12 @@ from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
-from pydantic import BaseModel
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
+from pydantic import BaseModel
 
 from . import __version__, db, investigate, oidc
+from .library import Library
 from .settings import Env
 
 log = logging.getLogger("incident_operator.app")
@@ -66,14 +67,17 @@ def create_webhook_app(database_url: str, engine=None) -> FastAPI:
         lines += [f'incident_operator_incidents{{status="{k}"}} {v}' for k, v in sorted(h["incidents"].items())]
         lines += ["# TYPE incident_operator_fixes gauge"]
         lines += [f'incident_operator_fixes{{status="{k}"}} {v}' for k, v in sorted(h["fixes"].items())]
-        lines += ["# HELP incident_operator_oldest_waiting_seconds Age of the oldest incident not yet triaged (0: none).",
+        lines += ["# HELP incident_operator_oldest_waiting_seconds"
+                  " Age of the oldest incident not yet triaged (0: none).",
                   "# TYPE incident_operator_oldest_waiting_seconds gauge",
                   f"incident_operator_oldest_waiting_seconds {float(h['oldest_waiting']):.0f}",
-                  "# HELP incident_operator_oldest_unmailed_seconds Age of the oldest answered incident not yet mailed.",
+                  "# HELP incident_operator_oldest_unmailed_seconds"
+                  " Age of the oldest answered incident not yet mailed.",
                   "# TYPE incident_operator_oldest_unmailed_seconds gauge",
                   f"incident_operator_oldest_unmailed_seconds {float(h['oldest_unmailed']):.0f}"]
         if engine is not None and engine.last_pass is not None:
-            lines += ["# HELP incident_operator_last_pass_timestamp_seconds When the triage loop last completed a pass.",
+            lines += ["# HELP incident_operator_last_pass_timestamp_seconds"
+                      " When the triage loop last completed a pass.",
                       "# TYPE incident_operator_last_pass_timestamp_seconds gauge",
                       f"incident_operator_last_pass_timestamp_seconds {engine.last_pass:.0f}"]
         return "\n".join(lines) + "\n"
@@ -194,7 +198,7 @@ def _add_signin(app: FastAPI, settings: UiSettings) -> Callable[[Request], dict 
     return current_user
 
 
-def create_ui_app(database_url: str, settings: UiSettings, library=None) -> FastAPI:
+def create_ui_app(database_url: str, settings: UiSettings, library: Library | None = None) -> FastAPI:
     app = _pool_app(database_url, "incident-operator")
     page = files("incident_operator").joinpath("static/index.html").read_text()
     current_user = _add_signin(app, settings)
@@ -216,8 +220,8 @@ def create_ui_app(database_url: str, settings: UiSettings, library=None) -> Fast
 
     @app.get("/api/incidents")
     def incidents(c=Depends(_conn)):
-        covered = (lambda labels: library.match(labels) is not None) if library else None
-        return {"incidents": db.list_incidents(c), "needs_runbook": db.needs_runbook(c, covered)}
+        return {"incidents": db.list_incidents(c),
+                "needs_runbook": db.needs_runbook(c, library.covers if library else None)}
 
     @app.get("/api/incidents/{incident_id}")
     def incident(incident_id: int, c=Depends(_conn)):
@@ -251,7 +255,7 @@ def create_ui_app(database_url: str, settings: UiSettings, library=None) -> Fast
         user = current_user(request)
         return {"user": user and (user.get("name") or user["sub"]), "can_decide": bool(user) or anonymous_ok}
 
-    def decide(run_id: int, approve: bool, request: Request, c) -> dict:
+    def decide(run_id: int, approve: bool, request: Request, c) -> dict | None:
         # JSON only: a cross-site form can't send it without a preflight, and the session cookie is SameSite=Lax.
         if not request.headers.get("content-type", "").startswith("application/json"):
             raise HTTPException(415, "send application/json")
