@@ -1,21 +1,22 @@
 """Read-only evidence for an alert, collected by code before any model call (docs/design.md §5).
 
-Phase 1 has no runbooks, so this is the generic set (design §6.5): whatever the alert's labels name. A pod gets its
-status, events and log tail (previous container's too, after a restart); a Job its status, events and its newest pod;
-a Deployment/StatefulSet/DaemonSet its status and events; a node (label `node`, or `instance` mapped to a node by IP)
-its conditions and events. Every item is capped, and the whole set has a budget, so a small model's prompt stays small.
+This is the generic set (design §6.5), used when no runbook matches and by the `alert-objects` read op: whatever the
+alert's labels name. A pod gets its status, events and log tail (previous container's too, after a restart); a Job its
+status, events and its newest pod; a Deployment/StatefulSet/DaemonSet its status and events; a node (label `node`, or
+`instance` mapped to a node by IP) its conditions and events. Every item is capped, and the whole set has a budget, so a small model's prompt stays small.
 
-Kubernetes is read through the API with the pod's own service-account token (a ClusterRole that can only get/list pods,
-pods/log, events, jobs, workloads and nodes). Nothing here can change anything.
+Everything here only reads, through `K8s.get` (the operator's ClusterRole for this can only get/list pods, pods/log,
+events, jobs, workloads and nodes).
 """
 from __future__ import annotations
 
 import itertools
 import json
 import logging
-import os
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
+
+from .k8s import K8s
 
 log = logging.getLogger("incident_operator.evidence")
 
@@ -33,52 +34,6 @@ class Item:
     content: str | None
     truncated: bool = False
     error: str | None = None
-
-
-class K8s:
-    """Minimal read-only Kubernetes API client. In the cluster it uses the service-account token and CA; tests pass
-    a fake with the same `get`."""
-
-    SA = "/var/run/secrets/kubernetes.io/serviceaccount"
-
-    def __init__(self, base: str | None = None, token: str | None = None, verify: Any = True):
-        if base is None:
-            host, port = os.environ["KUBERNETES_SERVICE_HOST"], os.environ["KUBERNETES_SERVICE_PORT"]
-            base = f"https://{host}:{port}"
-            token = open(f"{self.SA}/token").read().strip()
-            verify = f"{self.SA}/ca.crt"
-        self.base, self.token, self.verify = base, token, verify
-
-    def get(self, path: str, params: dict | None = None, text: bool = False):
-        import httpx
-        r = httpx.get(self.base + path, params=params, timeout=15, verify=self.verify,
-                      headers={"Authorization": f"Bearer {self.token}"} if self.token else {})
-        r.raise_for_status()
-        return r.text if text else r.json()
-
-    # Used only to create and remove probe Jobs (ops.Runner._probe), in the operator's own namespace.
-    def post(self, path: str, body: dict) -> dict:
-        import httpx
-        r = httpx.post(self.base + path, json=body, timeout=15, verify=self.verify,
-                       headers={"Authorization": f"Bearer {self.token}"} if self.token else {})
-        r.raise_for_status()
-        return r.json()
-
-    # Used only by the executor's AnnotateScrapeJob.
-    def patch(self, path: str, body: dict) -> dict:
-        import httpx
-        r = httpx.patch(self.base + path, content=json.dumps(body), timeout=15, verify=self.verify,
-                        headers={"Content-Type": "application/merge-patch+json",
-                                 **({"Authorization": f"Bearer {self.token}"} if self.token else {})})
-        r.raise_for_status()
-        return r.json()
-
-    def delete(self, path: str, params: dict | None = None) -> None:
-        import httpx
-        r = httpx.delete(self.base + path, params=params, timeout=15, verify=self.verify,
-                         headers={"Authorization": f"Bearer {self.token}"} if self.token else {})
-        if r.status_code != 404:
-            r.raise_for_status()
 
 
 def collect(k8s: K8s, labels: dict[str, str]) -> list[Item]:

@@ -25,7 +25,7 @@ from pathlib import Path
 
 from . import db, investigate
 from .library import Library
-from .evidence import K8s
+from .k8s import K8s
 from .ops import Result, Runner
 from .triage import Config, GpuScheduler
 

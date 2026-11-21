@@ -22,7 +22,7 @@ import uvicorn
 
 from . import db
 from .app import create_ui_app, create_webhook_app
-from .evidence import K8s
+from .k8s import K8s
 from .library import Library
 from .notify import Notifier, SmtpConfig
 from .triage import Config, Engine, GpuScheduler
@@ -53,8 +53,7 @@ def main() -> None:
     logging.info("triage: %s, fallback %s after %ss; email %s", cfg.model, cfg.fallback, cfg.fallback_after_seconds,
                  f"to {', '.join(smtp.to)}" if smtp.usable else "off")
     # In the cluster: the service account. Locally: KUBE_API_URL, e.g. `kubectl proxy` at http://127.0.0.1:8001.
-    k8s = (None if os.environ.get("EVIDENCE", "on") == "off"
-           else K8s(base=os.environ["KUBE_API_URL"]) if os.environ.get("KUBE_API_URL") else K8s())
+    k8s = None if os.environ.get("EVIDENCE", "on") == "off" else K8s.from_env()
     library = Library(os.environ.get("RUNBOOKS_DIR", "/etc/incident-operator/runbooks"),
                       os.environ.get("OPERATIONS_DIR", "/etc/incident-operator/operations"), store=db.LastGood(conn))
     library.refresh()

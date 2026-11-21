@@ -15,7 +15,7 @@ import os
 import time
 
 from . import db
-from .evidence import K8s
+from .k8s import K8s
 from .fixes import valid_params
 from .library import SCRAPEJOB_ACTIONS, Library, Operation
 from .ops import _fill
@@ -108,7 +108,7 @@ def main() -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     conn = db.connect(os.environ["DATABASE_URL"])
     library = Library(None, os.environ.get("OPERATIONS_DIR", "/etc/incident-operator/operations"))
-    k8s = K8s(base=os.environ["KUBE_API_URL"]) if os.environ.get("KUBE_API_URL") else K8s()
+    k8s = K8s.from_env()
     log.info("executor: watching for ready fix runs")
     while True:
         try:

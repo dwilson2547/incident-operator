@@ -5,11 +5,11 @@ any of these: the test suite (with a test Postgres, see README: Develop) must pa
 
 ## 1. Kubernetes client
 
-- [ ] `K8s` moves out of `evidence.py` into `k8s.py`, so the evidence module is the read-only thing its docstring says
+- [x] `K8s` moves out of `evidence.py` into `k8s.py`, so the evidence module is the read-only thing its docstring says
       it is (the client also posts, patches and deletes for probes and the executor).
-- [ ] One `_request()` instead of four copies of the URL, timeout, `verify` and auth header.
-- [ ] One `httpx.Client` for the process, not a new connection per call.
-- [ ] The service-account token is re-read when the file changes (the kubelet rotates it), and the file is closed.
+- [x] One `_request()` instead of four copies of the URL, timeout, `verify` and auth header.
+- [x] One `httpx.Client` for the process, not a new connection per call.
+- [x] The service-account token is re-read when the file changes (the kubelet rotates it), and the file is closed.
 
 ## 2. Lint and types in CI
 
