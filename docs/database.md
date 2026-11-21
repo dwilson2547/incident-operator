@@ -1,8 +1,8 @@
 # Database
 
 The schema is defined once, in `src/incident_operator/models.py` (SQLAlchemy 2.0 models). `migrations/` holds the
-Alembic revisions that build it; `schema.upgrade` runs them, under an advisory lock so replicas starting together
-take turns.
+Alembic revisions that build it; `schema.upgrade` runs them at startup (`Store.migrate`), under an advisory lock so
+replicas starting together take turns.
 
 ## Changing the schema
 
@@ -21,7 +21,8 @@ State columns (`status`, `session`, `trigger`, `notified`) are stored as text an
 ## Databases from before Alembic
 
 Revision `0001` is the schema the startup DDL built. A database it built already has every table, so it is stamped at
-`0001` rather than upgraded (upgrading would try to create the tables again):
+`0001` rather than upgraded (upgrading would try to create the tables again). Startup refuses such a database
+(`schema.NotStamped`) until it is stamped:
 
     python -c 'import os; from alembic import command; from incident_operator import schema
     command.stamp(schema.alembic_config(os.environ["DATABASE_URL"]), "0001")'

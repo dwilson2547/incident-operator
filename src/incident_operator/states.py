@@ -1,7 +1,8 @@
 """The values the operator's state columns take, and the groups of them that queries ask for.
 
 They are StrEnums, so a row read back from Postgres (plain text) compares equal to them and psycopg stores their
-value. The schema's CHECK constraints (db.SCHEMA) list the same values; tests/test_states.py keeps the two in step.
+value. The schema's CHECK constraints are made from them (models.py), and tests/test_schema.py fails when an enum
+changes with no migration.
 """
 from __future__ import annotations
 

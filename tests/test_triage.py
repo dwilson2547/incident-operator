@@ -4,12 +4,14 @@ import uuid
 from datetime import UTC, datetime
 from unittest.mock import ANY
 
-from conftest import alert, needs_pg, sql
+import pytest
+from alembic import command
+from conftest import URL, alert, needs_pg, sql
 from fastapi.testclient import TestClient
 from test_evidence import EVENTS, POD, FakeK8s
 from testconfig import smtp_config, triage_config, ui_settings
 
-from incident_operator import db
+from incident_operator import db, schema
 from incident_operator.app import create_ui_app, create_webhook_app
 from incident_operator.models import Incident
 from incident_operator.notify import Notifier, compose
@@ -264,14 +266,16 @@ def test_hourly_cap_holds_the_rest_and_skips_long_resolved(store, tmp_path):
     assert store.incident(ids[3]).status == "triaging" and len(gpu.submitted) == 3
 
 
-def test_migrates_a_phase_1_database(store):
-    sql(store, "DROP TABLE op_runs, evidence, model_turns, incidents")
-    old = db.SCHEMA.split("-- Added after the first release")[0].replace(", 'repeat', 'skipped'", "")
-    sql(store, old)
-    sql(store, "INSERT INTO incidents (fingerprint, alertname, labels, annotations) VALUES ('f', 'A', '{}', '{}')")
+@needs_pg
+def test_startup_refuses_a_database_from_before_alembic_until_it_is_stamped(store):
+    inc_id, _ = store.record_firing(alert())
+    sql(store, "DROP TABLE alembic_version")                       # what production looks like before the stamp
+    with pytest.raises(schema.NotStamped):
+        store.migrate()
+    command.stamp(schema.alembic_config(URL), "0001")
     store.migrate()
-    store.migrate()                                                               # and again: idempotent
-    sql(store, "UPDATE incidents SET status = 'repeat'")
+    store.migrate()                                                # and again: nothing to do
+    assert store.incident(inc_id).alertname == "KubePodCrashLooping"
 
 
 @needs_pg

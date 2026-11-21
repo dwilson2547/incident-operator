@@ -24,10 +24,21 @@ def alembic_config(url: str = "") -> Config:
     return cfg
 
 
+class NotStamped(RuntimeError):
+    """The tables are there but Alembic has no record of them: a database the startup DDL built, before Alembic."""
+
+
 def upgrade(engine: Engine) -> None:
-    """Run any migration this database hasn't had. The lock makes replicas starting together take turns."""
+    """Run any migration this database hasn't had. The lock makes replicas starting together take turns.
+
+    Refuses a database that has the tables and no `alembic_version`: upgrading it would try to create them again.
+    It is stamped at 0001 by hand once (docs/database.md), after checking its schema is 0001's."""
     with engine.begin() as conn:
         conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('incident_operator.migrate'))"))
+        tables = set(conn.execute(text(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()")).scalars())
+        if "incidents" in tables and "alembic_version" not in tables:
+            raise NotStamped("this database predates Alembic: stamp it at 0001 first (docs/database.md)")
         cfg = alembic_config()
         cfg.attributes["connection"] = conn
         command.upgrade(cfg, "head")

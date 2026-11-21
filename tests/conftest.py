@@ -13,7 +13,7 @@ URL = os.environ.get("INCIDENT_OPERATOR_TEST_DATABASE_URL", "")
 needs_pg = pytest.mark.skipif(not URL, reason="INCIDENT_OPERATOR_TEST_DATABASE_URL not set")
 
 
-OURS = {"incidents", "evidence", "model_turns", "op_runs", "library_last_good"}
+OURS = {"incidents", "evidence", "model_turns", "op_runs", "library_last_good", "alembic_version"}
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def store():
     if other:
         s.close()
         pytest.exit(f"refusing to test against {URL}: it has other tables ({sorted(other)[:5]}…)", returncode=2)
-    sql(s, "DROP TABLE IF EXISTS library_last_good, op_runs, evidence, model_turns, incidents")
+    sql(s, "DROP TABLE IF EXISTS alembic_version, library_last_good, op_runs, evidence, model_turns, incidents")
     s.migrate()
     yield s
     s.close()

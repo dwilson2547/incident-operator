@@ -31,6 +31,7 @@ from sqlalchemy import Boolean, ColumnElement, create_engine, func, literal_colu
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
+from . import schema
 from .models import Evidence, Incident, LibraryLastGood, ModelTurn, OpRun
 from .schema import engine_url
 from .states import (
@@ -50,141 +51,6 @@ from .states import Session as TurnSession
 
 if TYPE_CHECKING:
     from .ops import Result
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS incidents (
-    id                 bigserial PRIMARY KEY,
-    fingerprint        text NOT NULL,
-    alertname          text NOT NULL,
-    severity           text,
-    labels             jsonb NOT NULL,
-    annotations        jsonb NOT NULL,
-    generator_url      text,
-    status             text NOT NULL DEFAULT 'new'
-                       CHECK (status IN ('new', 'triaging', 'investigating', 'advising', 'analysed',
-                                         'triage_failed', 'repeat', 'skipped', 'rerun')),
-    runbook            text,                       -- none in phase 1: every incident needs one
-    starts_at          timestamptz,
-    first_seen         timestamptz NOT NULL DEFAULT now(),
-    last_seen          timestamptz NOT NULL DEFAULT now(),
-    alert_resolved_at  timestamptz,
-    analysis           text,                       -- the model's answer
-    analysis_model     text,                       -- which model answered (gpu-scheduler ran_model)
-    analysis_worker    text,
-    notified_at        timestamptz,
-    error              text
-);
--- One open incident per fingerprint.
-CREATE UNIQUE INDEX IF NOT EXISTS incidents_open_fingerprint ON incidents (fingerprint) WHERE alert_resolved_at IS NULL;
-CREATE INDEX IF NOT EXISTS incidents_status ON incidents (status) WHERE status IN ('new', 'triaging');
-CREATE INDEX IF NOT EXISTS incidents_first_seen ON incidents (first_seen DESC);
--- Added after the first release: repeats and skips.
-ALTER TABLE incidents ADD COLUMN IF NOT EXISTS problem_key text;
-ALTER TABLE incidents ADD COLUMN IF NOT EXISTS repeat_of bigint REFERENCES incidents (id);
-ALTER TABLE incidents DROP CONSTRAINT IF EXISTS incidents_status_check;
-ALTER TABLE incidents ADD CONSTRAINT incidents_status_check
-    CHECK (status IN ('new', 'triaging', 'investigating', 'advising', 'analysed',
-                      'triage_failed', 'repeat', 'skipped', 'rerun'));
-CREATE INDEX IF NOT EXISTS incidents_problem_key ON incidents (problem_key, first_seen DESC);
-CREATE INDEX IF NOT EXISTS incidents_repeat_of ON incidents (repeat_of) WHERE repeat_of IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS evidence (
-    id            bigserial PRIMARY KEY,
-    incident_id   bigint NOT NULL REFERENCES incidents (id) ON DELETE CASCADE,
-    kind          text NOT NULL,                   -- pod | events | logs | job | node | ...
-    source        text NOT NULL,                   -- what was read, e.g. "pod gyopart/ryans-…"
-    content       text,
-    truncated     boolean NOT NULL DEFAULT false,
-    error         text,
-    collected_at  timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS evidence_incident ON evidence (incident_id);
-
--- Exactly what each model call saw and returned, for replay (design §9.5).
-CREATE TABLE IF NOT EXISTS model_turns (
-    id              bigserial PRIMARY KEY,
-    incident_id     bigint NOT NULL REFERENCES incidents (id) ON DELETE CASCADE,
-    session         text NOT NULL,                 -- 'triage' in phase 1
-    prompt_version  text NOT NULL,
-    model           text NOT NULL,                 -- requested
-    fallback        text[],
-    gpu_job_id      uuid,
-    status          text NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted', 'done', 'failed')),
-    messages        jsonb NOT NULL,
-    result          jsonb,
-    ran_model       text,
-    worker          text,
-    error           text,
-    submitted_at    timestamptz NOT NULL DEFAULT now(),
-    finished_at     timestamptz
-);
-CREATE INDEX IF NOT EXISTS model_turns_incident ON model_turns (incident_id);
-CREATE INDEX IF NOT EXISTS model_turns_pending ON model_turns (status) WHERE status = 'submitted';
-
--- Phase 2: runbooks (design §6). An incident that matched a runbook records its revision and the derived target;
--- the investigation ends in findings, the remediation step in advice. Evidence rows are operation results too.
-ALTER TABLE incidents ADD COLUMN IF NOT EXISTS runbook_rev text;
-ALTER TABLE incidents ADD COLUMN IF NOT EXISTS target jsonb;
-ALTER TABLE incidents ADD COLUMN IF NOT EXISTS findings jsonb;
-ALTER TABLE incidents ADD COLUMN IF NOT EXISTS advice jsonb;
-ALTER TABLE evidence ADD COLUMN IF NOT EXISTS trigger text NOT NULL DEFAULT 'generic';   -- generic|precursor|requested
-ALTER TABLE evidence ADD COLUMN IF NOT EXISTS operation text;
-ALTER TABLE evidence ADD COLUMN IF NOT EXISTS round int;
-ALTER TABLE evidence ADD COLUMN IF NOT EXISTS data jsonb;
-ALTER TABLE model_turns ADD COLUMN IF NOT EXISTS turn int NOT NULL DEFAULT 1;
-ALTER TABLE model_turns ADD COLUMN IF NOT EXISTS json_schema jsonb;
-ALTER TABLE model_turns ADD COLUMN IF NOT EXISTS output jsonb;               -- the parsed JSON reply
-
--- Phase 3: fixes (design §7, fixes.py). One row per proposed mutating operation; its pre/post check results are
--- evidence rows with trigger pre|post. `notified` is the status last mailed, so each outcome is mailed once.
-CREATE TABLE IF NOT EXISTS op_runs (
-    id             bigserial PRIMARY KEY,
-    incident_id    bigint NOT NULL REFERENCES incidents (id) ON DELETE CASCADE,
-    operation      text NOT NULL,
-    op_rev         text NOT NULL,
-    params         jsonb NOT NULL,
-    autonomy       text NOT NULL,
-    status         text NOT NULL CHECK (status IN ('suggested', 'proposed', 'approved', 'rejected', 'refused',
-                                                   'ready', 'running', 'settling', 'failed', 'succeeded',
-                                                   'post_failed')),
-    command        text,                           -- the kubectl equivalent
-    proposed_at    timestamptz NOT NULL DEFAULT now(),
-    decided_by     text,
-    decided_at     timestamptz,
-    started_at     timestamptz,
-    post_due_at    timestamptz,
-    finished_at    timestamptz,
-    checks         text,                           -- one line per pre/post check: pass/FAIL, expectation, value seen
-    result         text,                           -- what the executor did
-    error          text,
-    notified       text
-);
-CREATE INDEX IF NOT EXISTS op_runs_incident ON op_runs (incident_id);
-
--- The last version of each runbook and operation file that loaded (library.Library), so a rejected file falls back to
--- it even after a restart.
-CREATE TABLE IF NOT EXISTS library_last_good (
-    file      text PRIMARY KEY,                    -- runbooks/<name>.md | operations/<name>.yaml
-    content   bytea NOT NULL,
-    rev       text NOT NULL,
-    saved_at  timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS op_runs_active ON op_runs (status)
-    WHERE status IN ('proposed', 'approved', 'ready', 'running', 'settling');
-
--- Re-runs (begin_rerun). A re-run keeps the row, because only one incident per fingerprint can be open, so its turns
--- are told apart by attempt and the answers it replaced are kept here. A fix still waiting when a re-run starts is
--- `superseded`: nobody decided on it, so it isn't a rejection in the fix's record.
-ALTER TABLE incidents ADD COLUMN IF NOT EXISTS attempt int NOT NULL DEFAULT 1;
-ALTER TABLE incidents ADD COLUMN IF NOT EXISTS rerun_model text;
-ALTER TABLE incidents ADD COLUMN IF NOT EXISTS rerun_by text;
-ALTER TABLE incidents ADD COLUMN IF NOT EXISTS earlier_attempts jsonb NOT NULL DEFAULT '[]';
-ALTER TABLE model_turns ADD COLUMN IF NOT EXISTS attempt int NOT NULL DEFAULT 1;
-ALTER TABLE op_runs DROP CONSTRAINT IF EXISTS op_runs_status_check;
-ALTER TABLE op_runs ADD CONSTRAINT op_runs_status_check
-    CHECK (status IN ('suggested', 'proposed', 'approved', 'rejected', 'refused', 'ready', 'running', 'settling',
-                      'failed', 'succeeded', 'post_failed', 'superseded'));
-"""
 
 
 # -- intake ------------------------------------------------------------------------------------------------------------
@@ -301,9 +167,8 @@ class Store:
             yield s
 
     def migrate(self) -> None:
-        with self.engine.begin() as c:
-            c.execute(text("SELECT pg_advisory_xact_lock(hashtext('incident_operator.migrate'))"))
-            c.exec_driver_sql(SCHEMA)
+        """Bring the database up to the models (migrations/); schema.upgrade says when it refuses."""
+        schema.upgrade(self.engine)
 
     # -- intake --------------------------------------------------------------------------------------------------------
 

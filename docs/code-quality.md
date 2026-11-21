@@ -89,5 +89,6 @@ as untyped dicts. It becomes SQLAlchemy 2.0 models and Alembic migrations (docs/
       change, not one function at a time: every caller took a connection, so they all moved together. The two list
       reads with window functions (`list_incidents`, `related`) stay SQL through `text()` and return dicts/TypedDicts.
       No separate domain layer: `triage.py` and `fixes.py` already are one, with the Store as their repository.
-- [ ] Startup runs `schema.upgrade` instead of `SCHEMA`; production stamped at `0001` first (docs/database.md).
+- [x] Startup runs `schema.upgrade` instead of `SCHEMA`, and refuses a database with the tables and no
+      `alembic_version` rather than guess; production stamped at `0001` first (docs/database.md).
 - [ ] Final check: the API's JSON responses from old and new code, on a copy of production data, compared.
