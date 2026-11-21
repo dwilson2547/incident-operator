@@ -8,7 +8,6 @@ operation's `result:<operation>.<path>` parameter can read. Nothing here writes 
 from __future__ import annotations
 
 import logging
-import os
 import re
 import time
 from dataclasses import dataclass
@@ -16,6 +15,7 @@ from typing import Any
 
 from . import evidence
 from .library import Operation
+from .settings import Env
 
 log = logging.getLogger("incident_operator.ops")
 
@@ -35,9 +35,8 @@ class Result:
 
 
 class Prometheus:
-    def __init__(self, url: str | None = None):
-        self.url = (url or os.environ.get("PROMETHEUS_URL")
-                    or "http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090").rstrip("/")
+    def __init__(self, url: str):
+        self.url = url.rstrip("/")
 
     def get(self, path: str, params: dict) -> dict:
         import httpx
@@ -143,9 +142,13 @@ def probe_job(name: str, node: str, probe: str, image: str, deadline: int) -> di
 class Runner:
     def __init__(self, k8s, prom: Prometheus | None = None, probe_namespace: str | None = None,
                  probe_image: str | None = None):
-        self.k8s, self.prom = k8s, prom or Prometheus()
-        self.probe_namespace = probe_namespace or os.environ.get("PROBE_NAMESPACE")
-        self.probe_image = probe_image or os.environ.get("PROBE_IMAGE")
+        """Without `prom`, promql operations fail; without a probe namespace and image, probes do."""
+        self.k8s, self.prom = k8s, prom
+        self.probe_namespace, self.probe_image = probe_namespace, probe_image
+
+    @classmethod
+    def from_env(cls, k8s, env: Env) -> Runner:
+        return cls(k8s, Prometheus(env.str("PROMETHEUS_URL")), env.str("PROBE_NAMESPACE"), env.str("PROBE_IMAGE"))
 
     def run(self, op: Operation, target: dict | None, labels: dict, earlier: dict[str, Result]) -> Result:
         try:
@@ -282,6 +285,8 @@ class Runner:
                 log.warning("could not delete probe job %s: %s", job, e)
 
     def _promql(self, op: Operation, params: dict) -> Result:
+        if self.prom is None:
+            raise RuntimeError("Prometheus is not configured (PROMETHEUS_URL)")
         run = op.run
         out, data = [], {}
         for qname, expr in run["queries"].items():

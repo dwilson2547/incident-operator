@@ -10,8 +10,9 @@ from conftest import alert, needs_pg
 from incident_operator import db, investigate
 from incident_operator.library import Library, resolve_target
 from incident_operator.ops import Prometheus, Result, Runner
-from incident_operator.triage import Config, Engine
+from incident_operator.triage import Engine
 from test_evidence import EVENTS, POD, FakeK8s
+from testconfig import triage_config
 
 CHART = Path(__file__).resolve().parents[1] / "helm" / "incident-operator" / "files"
 
@@ -209,8 +210,8 @@ def engine(conn, gpu, tmp_path, k8s=None):
     primer = tmp_path / "primer.md"
     primer.write_text("Exit 137 = OOMKilled.")
     k8s = k8s or crash_k8s()
-    return Engine(conn, Config(primer_path=str(primer)), k8s, gpu, None, library=load(CHART),
-                  runner=Runner(k8s, FakeProm()))
+    return Engine(conn, triage_config(primer_path=str(primer)), k8s, gpu, None, Runner(k8s, FakeProm()),
+                  library=load(CHART))
 
 
 @needs_pg

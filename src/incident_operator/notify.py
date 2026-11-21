@@ -4,11 +4,12 @@ names as scrape-job-manager's notifier."""
 from __future__ import annotations
 
 import logging
-import os
 import smtplib
 import ssl
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from email.message import EmailMessage
+
+from .settings import Env
 
 log = logging.getLogger("incident_operator.notify")
 
@@ -17,24 +18,25 @@ TARGET_LABELS = ("namespace", "pod", "job_name", "deployment", "statefulset", "d
 
 @dataclass
 class SmtpConfig:
-    host: str = ""
-    port: int = 587
-    starttls: bool = True
-    username: str = ""
-    password: str = ""
-    sender: str = ""
-    to: list[str] = field(default_factory=list)
-    public_url: str = ""
+    host: str                   # empty: email is off
+    port: int
+    starttls: bool
+    username: str
+    password: str
+    sender: str
+    to: list[str]
+    public_url: str             # base of the links in each email
 
     @classmethod
-    def from_env(cls) -> "SmtpConfig":
-        e = os.environ
-        return cls(host=e.get("SMTP_HOST", ""), port=int(e.get("SMTP_PORT", "587")),
-                   starttls=e.get("SMTP_STARTTLS", "true").lower() == "true",
-                   username=e.get("SMTP_USERNAME", ""), password=e.get("SMTP_PASSWORD", ""),
-                   sender=e.get("SMTP_FROM", "") or e.get("SMTP_USERNAME", ""),
-                   to=[a.strip() for a in e.get("SMTP_TO", "").split(",") if a.strip()],
-                   public_url=e.get("PUBLIC_URL", "").rstrip("/"))
+    def from_env(cls, env: Env) -> SmtpConfig:
+        """SMTP_HOST and PUBLIC_URL always; the rest only when SMTP_HOST is set (an empty one turns email off)."""
+        host, public_url = env.str("SMTP_HOST"), env.str("PUBLIC_URL").rstrip("/")
+        if not host:
+            return cls(host="", port=0, starttls=False, username="", password="", sender="", to=[],
+                       public_url=public_url)
+        return cls(host=host, port=env.int("SMTP_PORT"), starttls=env.bool("SMTP_STARTTLS"),
+                   username=env.str("SMTP_USERNAME"), password=env.str("SMTP_PASSWORD"),
+                   sender=env.str("SMTP_FROM"), to=env.list("SMTP_TO"), public_url=public_url)
 
     @property
     def usable(self) -> bool:

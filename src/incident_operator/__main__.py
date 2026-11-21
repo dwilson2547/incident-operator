@@ -1,10 +1,9 @@
-"""`python -m incident_operator`: the webhook (8081), the UI (8080) and the triage loop, in one process.
+"""`python -m incident_operator`: the webhook, the UI and the triage loop, in one process.
 
-Env: DATABASE_URL; GPU_SCHEDULER_URL, GPU_SCHEDULER_TOKEN, TRIAGE_MODEL, TRIAGE_FALLBACK,
-TRIAGE_FALLBACK_AFTER_SECONDS (triage.Config); SMTP_* and PUBLIC_URL (notify.SmtpConfig); PRIMER_PATH;
-UI_PORT, WEBHOOK_PORT (8080, 8081); KUBE_API_URL for local runs (`kubectl proxy`); EVIDENCE=off to skip the Kubernetes reads;
-RUNBOOKS_DIR, OPERATIONS_DIR (/etc/incident-operator/{runbooks,operations}); PROMETHEUS_URL; OIDC_ISSUER,
-OIDC_CLIENT_ID, OIDC_CLIENT_SECRET for sign-in (app.py).
+All configuration is environment variables, set by the chart (helm/incident-operator/templates, from values.yaml) or by
+start.sh locally; there are no defaults in code, and a missing one stops start-up (settings.py). Optional local-run
+switches: KUBE_API_URL (`kubectl proxy` instead of the service account), EVIDENCE=off (no Kubernetes reads),
+ALLOW_ANONYMOUS_DECISIONS=1 (approve fixes without sign-in).
 
 `python -m incident_operator executor` runs fixes approved in the UI (executor.py), as its own Deployment.
 
@@ -13,7 +12,6 @@ OIDC_CLIENT_ID, OIDC_CLIENT_SECRET for sign-in (app.py).
 import asyncio
 import contextlib
 import logging
-import os
 import signal
 import sys
 import threading
@@ -21,10 +19,12 @@ import threading
 import uvicorn
 
 from . import db
-from .app import create_ui_app, create_webhook_app
+from .app import UiSettings, create_ui_app, create_webhook_app
 from .k8s import K8s
 from .library import Library
 from .notify import Notifier, SmtpConfig
+from .ops import Runner
+from .settings import Env
 from .triage import Config, Engine, GpuScheduler
 
 
@@ -41,28 +41,32 @@ class _Server(uvicorn.Server):
 
 
 def main() -> None:
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    url = os.environ["DATABASE_URL"]
-    conn = db.connect(url)
-    db.migrate(conn)
+    env = Env()
+    log_level, url = env.str("LOG_LEVEL"), env.str("DATABASE_URL")
+    runbooks_dir, operations_dir = env.str("RUNBOOKS_DIR"), env.str("OPERATIONS_DIR")
+    ui_port, hook_port = env.int("UI_PORT"), env.int("WEBHOOK_PORT")
+    cfg, smtp, ui = Config.from_env(env), SmtpConfig.from_env(env), UiSettings.from_env(env)
+    # In the cluster: the service account. Locally: KUBE_API_URL, e.g. `kubectl proxy` at http://127.0.0.1:8001.
+    k8s = None if env.optional("EVIDENCE") == "off" else K8s.from_env()
+    runner = Runner.from_env(k8s, env)
+    env.check()
 
-    cfg = Config.from_env()
-    smtp = SmtpConfig.from_env()
+    logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.info("triage: %s, fallback %s after %ss; email %s", cfg.model, cfg.fallback, cfg.fallback_after_seconds,
                  f"to {', '.join(smtp.to)}" if smtp.usable else "off")
-    # In the cluster: the service account. Locally: KUBE_API_URL, e.g. `kubectl proxy` at http://127.0.0.1:8001.
-    k8s = None if os.environ.get("EVIDENCE", "on") == "off" else K8s.from_env()
-    library = Library(os.environ.get("RUNBOOKS_DIR", "/etc/incident-operator/runbooks"),
-                      os.environ.get("OPERATIONS_DIR", "/etc/incident-operator/operations"), store=db.LastGood(conn))
+    conn = db.connect(url)
+    db.migrate(conn)
+    library = Library(runbooks_dir, operations_dir, store=db.LastGood(conn))
     library.refresh()
-    engine = Engine(conn, cfg, k8s, GpuScheduler(cfg), Notifier(smtp) if smtp.usable else None, library=library)
+    engine = Engine(conn, cfg, k8s, GpuScheduler(cfg), Notifier(smtp) if smtp.usable else None, runner,
+                    library=library)
     threading.Thread(target=engine.run_forever, name="triage", daemon=True).start()
 
-    ui_port, hook_port = int(os.environ.get("UI_PORT", 8080)), int(os.environ.get("WEBHOOK_PORT", 8081))
-    servers = [_Server(uvicorn.Config(create_ui_app(url, library), host="0.0.0.0", port=ui_port, log_level="warning")),
-               _Server(uvicorn.Config(create_webhook_app(url, engine), host="0.0.0.0", port=hook_port, log_level="warning"))]
+    servers = [_Server(uvicorn.Config(create_ui_app(url, ui, library), host="0.0.0.0", port=ui_port,
+                                      log_level="warning")),
+               _Server(uvicorn.Config(create_webhook_app(url, engine), host="0.0.0.0", port=hook_port,
+                                      log_level="warning"))]
 
     def stop(*_):
         engine.stopping = True

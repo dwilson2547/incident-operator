@@ -14,8 +14,9 @@ and tests only).
 from __future__ import annotations
 
 import logging
-import os
+from collections.abc import Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from html import escape
 from importlib.resources import files
 from urllib.parse import quote
@@ -27,7 +28,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from . import __version__, db, investigate, oidc
-from .triage import rerun_models
+from .settings import Env
 
 log = logging.getLogger("incident_operator.app")
 
@@ -114,12 +115,31 @@ def _failed_page(next_path: str, reason: str) -> HTMLResponse:
         f"<p><a style='color:#7852ee' href='{retry}'>Try again</a></p>", status_code=401)
 
 
-def _add_signin(app: FastAPI, env) -> callable:
+@dataclass
+class UiSettings:
+    public_url: str                 # the page's own address: sign-in callback base, and https decides secure cookies
+    oidc_issuer: str                # empty: no sign-in (the open LAN page, where nobody can approve a fix)
+    oidc_client_id: str
+    oidc_client_secret: str
+    rerun_models: list[dict]        # triage.Config.rerun_models
+    allow_anonymous_decisions: bool = False   # local runs only (ALLOW_ANONYMOUS_DECISIONS=1), and never with sign-in
+
+    @classmethod
+    def from_env(cls, env: Env) -> UiSettings:
+        """OIDC_CLIENT_ID and OIDC_CLIENT_SECRET are read only when OIDC_ISSUER is set."""
+        issuer = env.str("OIDC_ISSUER")
+        return cls(public_url=env.str("PUBLIC_URL"), oidc_issuer=issuer,
+                   oidc_client_id=env.str("OIDC_CLIENT_ID") if issuer else "",
+                   oidc_client_secret=env.str("OIDC_CLIENT_SECRET") if issuer else "",
+                   rerun_models=env.json("TRIAGE_RERUN_MODELS") or [],
+                   allow_anonymous_decisions=env.optional("ALLOW_ANONYMOUS_DECISIONS") == "1")
+
+
+def _add_signin(app: FastAPI, settings: UiSettings) -> Callable[[Request], dict | None]:
     """gpu-scheduler's dashboard sign-in (gpu_scheduler/dashboard.py), unchanged in shape. Returns current_user."""
-    issuer, secret = env.get("OIDC_ISSUER", ""), env.get("OIDC_CLIENT_SECRET", "")
+    issuer, secret, public_url = settings.oidc_issuer, settings.oidc_client_secret, settings.public_url
     if issuer and not secret:
         raise RuntimeError("OIDC_ISSUER is set without OIDC_CLIENT_SECRET")
-    public_url = env.get("PUBLIC_URL", "")
     secure = public_url.startswith("https://")
 
     def current_user(request: Request) -> dict | None:
@@ -127,7 +147,7 @@ def _add_signin(app: FastAPI, env) -> callable:
 
     if not issuer:
         return current_user
-    provider = oidc.Provider(issuer, env.get("OIDC_CLIENT_ID", "incident-operator"), secret)
+    provider = oidc.Provider(issuer, settings.oidc_client_id, secret)
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -174,13 +194,12 @@ def _add_signin(app: FastAPI, env) -> callable:
     return current_user
 
 
-def create_ui_app(database_url: str, library=None, env=None) -> FastAPI:
-    env = os.environ if env is None else env
+def create_ui_app(database_url: str, settings: UiSettings, library=None) -> FastAPI:
     app = _pool_app(database_url, "incident-operator")
     page = files("incident_operator").joinpath("static/index.html").read_text()
-    current_user = _add_signin(app, env)
-    anonymous_ok = env.get("ALLOW_ANONYMOUS_DECISIONS") == "1" and not env.get("OIDC_ISSUER")
-    models = rerun_models(env)
+    current_user = _add_signin(app, settings)
+    anonymous_ok = settings.allow_anonymous_decisions and not settings.oidc_issuer
+    models = settings.rerun_models
 
     def decider(request: Request) -> str:
         """Who is approving or rejecting. Signed in, or the explicit local-run override; never the open LAN page."""

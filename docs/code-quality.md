@@ -61,7 +61,8 @@ any of these: the test suite (with a test Postgres, see README: Develop) must pa
       `fixes.evaluate`, `investigate._span`, `Library.describe`.
 - [ ] No function-level imports without a reason (`httpx` in six places, `json` re-imported, `uuid`).
 - [ ] Stale "phase 1" comments and docstrings updated (`evidence.py`, `db.py`, schema column comments).
-- [ ] `Config.from_env` built from the dataclass fields instead of eleven hand-written lines.
+- [x] No defaults in code: every setting comes from the chart (or `local.env`), read through `settings.Env`, all
+  missing ones reported together at start-up; `tests/test_settings.py` checks the rendered chart covers them.
 
 ## 9. Schema
 

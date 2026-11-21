@@ -1,26 +1,17 @@
 """What else was going on (db.related, the block in the prompts) and re-running triage on stored evidence."""
-import json
 from datetime import timedelta
 
-import pytest
 from conftest import alert, needs_pg
 from fastapi.testclient import TestClient
 
 from incident_operator import db, investigate
 from incident_operator.app import create_ui_app
 from incident_operator.investigate import alert_subject, related_block
-from incident_operator.triage import Engine, Config
+from incident_operator.ops import Runner
+from incident_operator.triage import Engine
 from test_runbooks import ADVICE, CHART, FINDINGS, ScriptedGpu, crash_k8s, engine
 from test_triage import FakeGpu, Mailbox, k8s
-
-MODELS = [{"name": "qwen35-9b", "label": "9B", "max_prompt_tokens": 48000},
-          {"name": "gemma4-26b-a4b", "label": "Gemma", "max_prompt_tokens": 12000}]
-
-
-@pytest.fixture(autouse=True)
-def rerun_models(monkeypatch):
-    monkeypatch.setenv("TRIAGE_RERUN_MODELS", json.dumps(MODELS))
-
+from testconfig import RERUN_MODELS as MODELS, triage_config, ui_settings
 
 def fire(conn, fp, minutes=0, **labels):
     inc_id, _ = db.record_firing(conn, alert(fp, **labels))
@@ -177,9 +168,9 @@ def test_rerun_supersedes_a_waiting_fix_and_refuses_while_one_runs(conn, tmp_pat
 
 
 @needs_pg
-def test_rerun_over_the_models_limit_fails_without_sending(conn, tmp_path, monkeypatch):
+def test_rerun_over_the_models_limit_fails_without_sending(conn, tmp_path):
     e, gpu, inc_id = answered(conn, tmp_path)
-    monkeypatch.setenv("TRIAGE_RERUN_MODELS", json.dumps([{"name": "tiny", "max_prompt_tokens": 10}]))
+    e.cfg.rerun_models = [{"name": "tiny", "max_prompt_tokens": 10}]
     sent = len(gpu.submitted)
     db.begin_rerun(conn, inc_id, "tiny", "dan")
     e.start_reruns()
@@ -205,7 +196,8 @@ def test_rerun_without_a_runbook_is_one_plain_turn(conn, tmp_path):
     gpu, mail = FakeGpu(), Mailbox()
     primer = tmp_path / "primer.md"
     primer.write_text("primer")
-    e = Engine(conn, Config(primer_path=str(primer)), k8s(), gpu, mail)
+    cluster = k8s()
+    e = Engine(conn, triage_config(primer_path=str(primer)), cluster, gpu, mail, Runner(cluster))
     inc_id, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
     e.step(); gpu.finish(); e.step()
     assert db.get_incident(conn, inc_id)["status"] == "analysed"
@@ -227,10 +219,9 @@ def test_rerun_without_a_runbook_is_one_plain_turn(conn, tmp_path):
 @needs_pg
 def test_rerun_api(conn, tmp_path):
     e, gpu, inc_id = answered(conn, tmp_path)
-    with TestClient(create_ui_app(conn.info.dsn, None, {})) as c:             # no sign-in configured
+    with TestClient(create_ui_app(conn.info.dsn, ui_settings())) as c:             # no sign-in configured
         assert c.post(f"/api/incidents/{inc_id}/rerun", json={"model": "qwen35-9b"}).status_code == 403
-    env = {"ALLOW_ANONYMOUS_DECISIONS": "1", "TRIAGE_RERUN_MODELS": json.dumps(MODELS)}
-    with TestClient(create_ui_app(conn.info.dsn, None, env)) as c:
+    with TestClient(create_ui_app(conn.info.dsn, ui_settings(allow_anonymous_decisions=True))) as c:
         got = c.get(f"/api/incidents/{inc_id}").json()
         assert got["rerun_models"] == MODELS and got["related"]["nearby"] == []
         url = f"/api/incidents/{inc_id}/rerun"

@@ -105,7 +105,7 @@ and why, and how often each runbook matched.
 the live cluster):
 
 ```bash
-DATABASE_URL=... GPU_SCHEDULER_URL=... GPU_SCHEDULER_TOKEN=... .venv/bin/python -m incident_operator replay 12 15 --model gemma4-26b-a4b
+(set -a; . ./local.env; set +a; .venv/bin/python -m incident_operator replay 12 15 --model gemma4-26b-a4b)   # point DATABASE_URL etc. where needed
 ```
 
 `--live` runs the checks against the cluster as it is now instead (`KUBE_API_URL` from `kubectl proxy`,
@@ -158,22 +158,33 @@ answers found the right container, exit code and log line.
 
 ## Configuration
 
+Every setting comes from the chart's `values.yaml` (locally, from `local.env`); the code has no defaults. A missing
+variable stops start-up with one error naming all of them, and `tests/test_settings.py` renders the chart and checks it
+sets everything the service and the executor read. An empty value means "off" where noted.
+
 | Env | |
 |---|---|
+| `LOG_LEVEL`, `UI_PORT`, `WEBHOOK_PORT` | logging; the page and webhook ports |
 | `DATABASE_URL` | Postgres (Secret `incident-operator-db`) |
-| `GPU_SCHEDULER_URL`, `GPU_SCHEDULER_TOKEN` | gpu-scheduler API and this client's token |
-| `TRIAGE_MODEL`, `TRIAGE_FALLBACK`, `TRIAGE_FALLBACK_AFTER_SECONDS` | `qwen35-9b`, `gemma4-26b-a4b`, 60 |
-| `TRIAGE_DEADLINE_SECONDS`, `TRIAGE_MAX_NEW_TOKENS` | 900, 1024 |
-| `TRIAGE_REPEAT_WINDOW_SECONDS`, `TRIAGE_MAX_PER_HOUR`, `TRIAGE_SKIP_RESOLVED_AFTER_SECONDS` | 21600, 12, 3600 |
-| `PRIMER_PATH` | the primer file (the chart mounts it at `/etc/incident-operator/primer.md`) |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_TO`, `PUBLIC_URL` | email; off unless host, from and to are set |
-| `UI_PORT`, `WEBHOOK_PORT` | 8080, 8081 |
-| `RUNBOOKS_DIR`, `OPERATIONS_DIR`, `PROMETHEUS_URL` | the mounted ConfigMaps; Prometheus for `promql` operations |
-| `TRIAGE_INVESTIGATE_MAX_NEW_TOKENS` | 1536, per investigation/remediation turn |
-| `KUBE_API_URL` | local runs: e.g. `kubectl proxy` at `http://127.0.0.1:8001`; in the cluster the service account is used |
+| `GPU_SCHEDULER_URL`, `GPU_SCHEDULER_TOKEN` | gpu-scheduler API and this client's credential (empty locally) |
+| `TRIAGE_MODEL`, `TRIAGE_FALLBACK`, `TRIAGE_FALLBACK_AFTER_SECONDS`, `TRIAGE_FALLBACK_MAX_PROMPT_TOKENS` | model, fallbacks (comma-separated, may be empty), when and up to what prompt size to fall back |
+| `TRIAGE_DEADLINE_SECONDS`, `TRIAGE_MAX_NEW_TOKENS`, `TRIAGE_INVESTIGATE_MAX_NEW_TOKENS` | per-job deadline; answer sizes for triage and for investigation turns |
+| `TRIAGE_REPEAT_WINDOW_SECONDS`, `TRIAGE_MAX_PER_HOUR`, `TRIAGE_SKIP_RESOLVED_AFTER_SECONDS` | repeat suppression and rate limit |
+| `TRIAGE_RERUN_MODELS` | JSON list of `{name, label, max_prompt_tokens}` offered for re-runs (empty: none) |
+| `PRIMER_PATH`, `RUNBOOKS_DIR`, `OPERATIONS_DIR` | the primer file and the library (ConfigMaps in the chart) |
+| `PROMETHEUS_URL` | Prometheus for `promql` operations |
+| `PROBE_NAMESPACE`, `PROBE_IMAGE` | where and with what probe Jobs run (empty: probes off) |
+| `SMTP_HOST` | email; empty turns it off. When set, `SMTP_PORT`, `SMTP_STARTTLS`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_TO` are required |
+| `PUBLIC_URL` | links in emails and the sign-in callback's base |
+| `OIDC_ISSUER` | authentik sign-in for the page; empty turns it off. When set, `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET` are required |
+
+Optional local-run switches, never set by the chart:
+
+| Env | |
+|---|---|
+| `KUBE_API_URL` | e.g. `kubectl proxy` at `http://127.0.0.1:8001`; in the cluster the service account is used |
 | `EVIDENCE=off` | skip the Kubernetes reads |
-| `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | authentik sign-in for the page; `PUBLIC_URL` is the callback's base |
-| `ALLOW_ANONYMOUS_DECISIONS=1` | local runs only: approve without sign-in (ignored when `OIDC_ISSUER` is set) |
+| `ALLOW_ANONYMOUS_DECISIONS=1` | approve without sign-in (ignored when `OIDC_ISSUER` is set) |
 
 ## Develop
 
@@ -181,7 +192,7 @@ answers found the right container, exit code and log line.
 python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
 docker run -d --name io-pg -e POSTGRES_PASSWORD=dev -p 127.0.0.1:55444:5432 postgres:17
 PGPASSWORD=dev INCIDENT_OPERATOR_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55444/postgres .venv/bin/pytest -q
-./start.sh          # the service on :8090 (UI) / :8091 (webhook), evidence and email off
+./start.sh          # the service with local.env: :8090 (UI) / :8091 (webhook), evidence and email off
 ./kill.sh
 ```
 

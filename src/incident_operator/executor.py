@@ -11,7 +11,6 @@ Env: DATABASE_URL, OPERATIONS_DIR; KUBE_API_URL for local runs.
 from __future__ import annotations
 
 import logging
-import os
 import time
 
 from . import db
@@ -19,6 +18,7 @@ from .k8s import K8s
 from .fixes import valid_params
 from .library import SCRAPEJOB_ACTIONS, Library, Operation
 from .ops import _fill
+from .settings import Env
 
 log = logging.getLogger("incident_operator.executor")
 
@@ -103,11 +103,13 @@ def step(conn, library: Library, k8s: K8s) -> int:
 
 
 def main() -> int:
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    env = Env()
+    log_level, url, operations_dir = env.str("LOG_LEVEL"), env.str("DATABASE_URL"), env.str("OPERATIONS_DIR")
+    env.check()
+    logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    conn = db.connect(os.environ["DATABASE_URL"])
-    library = Library(None, os.environ.get("OPERATIONS_DIR", "/etc/incident-operator/operations"))
+    conn = db.connect(url)
+    library = Library(None, operations_dir)
     k8s = K8s.from_env()
     log.info("executor: watching for ready fix runs")
     while True:

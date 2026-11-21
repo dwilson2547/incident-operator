@@ -11,8 +11,9 @@ from incident_operator import db, executor, fixes
 from incident_operator.app import create_ui_app
 from incident_operator.library import Library
 from incident_operator.ops import Result, Runner
-from incident_operator.triage import Config, Engine
+from incident_operator.triage import Engine
 from test_evidence import FakeK8s
+from testconfig import smtp_config, triage_config, ui_settings
 from test_runbooks import CHART, FINDINGS, FakeProm, ScriptedGpu, load
 
 NODE = {"metadata": {"name": "k8s-worker1"},
@@ -100,9 +101,9 @@ def setup(conn, tmp_path, replies=None, k8s=None, lib=None):
     mail = Mailbox()
     primer = tmp_path / "primer.md"
     primer.write_text("")
-    e = Engine(conn, Config(primer_path=str(primer)), k8s, ScriptedGpu(replies or [
+    e = Engine(conn, triage_config(primer_path=str(primer)), k8s, ScriptedGpu(replies or [
         {"action": "done", "requests": [], "reason": "r", "findings": FINDINGS}, ADVICE_FIX]), mail,
-        library=lib or load(CHART), runner=runner)
+        runner, library=lib or load(CHART))
     return e, k8s, runner, mail
 
 
@@ -117,8 +118,8 @@ def analysed(conn, e):
     return db.get_incident(conn, inc_id)
 
 
-def approve(conn, run_id, env=None):
-    with TestClient(create_ui_app(conn.info.dsn, None, {"ALLOW_ANONYMOUS_DECISIONS": "1"} if env is None else env)) as c:
+def approve(conn, run_id, settings=None):
+    with TestClient(create_ui_app(conn.info.dsn, settings or ui_settings(allow_anonymous_decisions=True))) as c:
         return c.post(f"/api/fixes/{run_id}/approve", json={})
 
 
@@ -285,8 +286,8 @@ def test_executor_refuses_what_the_operation_does_not_allow(conn, tmp_path):
 def test_decisions_need_sign_in_and_json(conn):
     inc_id, _ = db.record_firing(conn, wedge_alert())
     rid = db.add_op_run(conn, inc_id, "restart-csi-nfs-node", "r", {"node": "n"}, "approve", "proposed")
-    assert approve(conn, rid, env={}).status_code == 403              # open LAN page: no approvals
-    with TestClient(create_ui_app(conn.info.dsn, None, {"ALLOW_ANONYMOUS_DECISIONS": "1"})) as c:
+    assert approve(conn, rid, ui_settings()).status_code == 403              # open LAN page: no approvals
+    with TestClient(create_ui_app(conn.info.dsn, ui_settings(allow_anonymous_decisions=True))) as c:
         assert c.post(f"/api/fixes/{rid}/approve", content="x",
                       headers={"content-type": "application/x-www-form-urlencoded"}).status_code == 415
         assert c.get("/api/me").json() == {"user": None, "can_decide": True}
@@ -296,8 +297,8 @@ def test_decisions_need_sign_in_and_json(conn):
 
 
 def test_signed_in_ui_redirects_and_guards_the_api():
-    app = create_ui_app("postgresql://unused", None, {"OIDC_ISSUER": "https://auth.example/application/o/x/",
-                                                      "OIDC_CLIENT_SECRET": "s", "PUBLIC_URL": "http://io.local"})
+    app = create_ui_app("postgresql://unused", ui_settings(oidc_issuer="https://auth.example/application/o/x/",
+                                                       oidc_client_id="io", oidc_client_secret="s"))
     c = TestClient(app)                                               # no `with`: the pool isn't needed
     assert c.get("/api/incidents").status_code == 401
     r = c.get("/", follow_redirects=False)
@@ -406,4 +407,4 @@ def test_executor_annotates_only_where_allowed(conn):
 
 def _mail_text(e, inc):
     from incident_operator.notify import SmtpConfig, compose
-    return compose(db.get_incident(e.conn, inc["id"]), SmtpConfig(sender="a@b", to=["c@d"])).get_content()
+    return compose(db.get_incident(e.conn, inc["id"]), smtp_config(sender="a@b", to=["c@d"])).get_content()

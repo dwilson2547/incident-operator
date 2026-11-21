@@ -111,9 +111,12 @@ spec:
         - name: incident-operator
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           ports:
-            - {name: ui, containerPort: 8080}
-            - {name: webhook, containerPort: 8081}
+            - {name: ui, containerPort: {{ .Values.ports.ui }}}
+            - {name: webhook, containerPort: {{ .Values.ports.webhook }}}
           env:
+            - {name: LOG_LEVEL, value: {{ .Values.logLevel | quote }}}
+            - {name: UI_PORT, value: {{ .Values.ports.ui | quote }}}
+            - {name: WEBHOOK_PORT, value: {{ .Values.ports.webhook | quote }}}
             - name: DATABASE_URL
               valueFrom: {secretKeyRef: {name: {{ .Values.secrets.database }}, key: DATABASE_URL}}
             - name: GPU_SCHEDULER_URL
@@ -124,6 +127,7 @@ spec:
             - {name: TRIAGE_RERUN_MODELS, value: {{ .Values.triage.rerunModels | toJson | quote }}}
             - {name: TRIAGE_FALLBACK, value: {{ .Values.triage.fallback | quote }}}
             - {name: TRIAGE_FALLBACK_AFTER_SECONDS, value: {{ .Values.triage.fallbackAfterSeconds | quote }}}
+            - {name: TRIAGE_FALLBACK_MAX_PROMPT_TOKENS, value: {{ .Values.triage.fallbackMaxPromptTokens | quote }}}
             - {name: TRIAGE_DEADLINE_SECONDS, value: {{ .Values.triage.deadlineSeconds | quote }}}
             - {name: TRIAGE_MAX_NEW_TOKENS, value: {{ .Values.triage.maxNewTokens | quote }}}
             - {name: TRIAGE_REPEAT_WINDOW_SECONDS, value: {{ .Values.triage.repeatWindowSeconds | quote }}}
@@ -138,6 +142,7 @@ spec:
             - {name: TRIAGE_INVESTIGATE_MAX_NEW_TOKENS, value: {{ .Values.triage.investigateMaxNewTokens | quote }}}
             - {name: SMTP_HOST, value: {{ .Values.smtp.host | quote }}}
             - {name: SMTP_PORT, value: {{ .Values.smtp.port | quote }}}
+            - {name: SMTP_STARTTLS, value: {{ .Values.smtp.starttls | quote }}}
             - {name: SMTP_USERNAME, value: {{ .Values.smtp.username | quote }}}
             - name: SMTP_PASSWORD
               valueFrom: {secretKeyRef: {name: {{ .Values.secrets.smtp }}, key: SMTP_PASSWORD}}
@@ -145,8 +150,8 @@ spec:
             - {name: SMTP_TO, value: {{ .Values.smtp.to | quote }}}
             - {name: PUBLIC_URL, value: {{ .Values.ui.publicUrl | quote }}}
             {{- with .Values.ui.oidc }}
-            {{- if .issuer }}
             - {name: OIDC_ISSUER, value: {{ .issuer | quote }}}
+            {{- if .issuer }}
             - {name: OIDC_CLIENT_ID, value: {{ .clientId | quote }}}
             - name: OIDC_CLIENT_SECRET
               valueFrom: {secretKeyRef: {name: {{ required "ui.oidc.secret (key client_secret)" .secret }}, key: client_secret}}
@@ -353,6 +358,7 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           command: [python, -m, incident_operator, executor]
           env:
+            - {name: LOG_LEVEL, value: {{ .Values.logLevel | quote }}}
             - name: DATABASE_URL
               valueFrom: {secretKeyRef: {name: {{ .Values.secrets.database }}, key: DATABASE_URL}}
             - {name: OPERATIONS_DIR, value: /etc/incident-operator/operations}

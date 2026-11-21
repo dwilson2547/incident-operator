@@ -25,15 +25,15 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import db, evidence, fixes, investigate
 from .library import Library, resolve_target
 from .ops import Result, Runner
+from .settings import Env
 
 log = logging.getLogger("incident_operator.triage")
 
@@ -49,51 +49,49 @@ Will it fix itself: whether waiting or a retry is likely to help."""
 
 @dataclass
 class Config:
-    gpu_url: str = "http://gpu-scheduler-api.gpu-scheduler.svc"
-    gpu_token: str = ""
-    model: str = "qwen35-9b"
-    fallback: list[str] = field(default_factory=lambda: ["gemma4-26b-a4b"])
-    fallback_after_seconds: int = 60
-    # The fallback (gemma4-26b-a4b on the Mac) has a 16k context in gpu-scheduler's values: a longer prompt would fail
-    # there, so it is sent to the main model only. Estimated at 3 characters a token (logs tokenize worse than prose).
-    fallback_max_prompt_tokens: int = 12000
-    deadline_seconds: int = 900
-    max_new_tokens: int = 1024
-    investigate_max_new_tokens: int = 1536     # one JSON reply per turn (768 cut long 'why's mid-JSON)
-    primer_path: str = "/etc/incident-operator/primer.md"
-    repeat_window_seconds: int = 6 * 3600      # same problem key triaged this recently -> `repeat`, no new report
-    max_per_hour: int = 12                     # triage submissions; the rest wait
-    skip_resolved_after_seconds: int = 3600    # a waiting incident resolved this long ago -> `skipped`
+    """Triage settings, all from the chart's `triage` values (settings.py: no fallbacks in code)."""
+    gpu_url: str
+    gpu_token: str
+    model: str
+    fallback: list[str]                 # other models that may take a job after fallback_after_seconds
+    fallback_after_seconds: int
+    # A longer prompt goes to the main model only: the fallback may be served with a smaller context (gemma4-26b-a4b
+    # on the Mac has 16k). Checked with estimate_tokens.
+    fallback_max_prompt_tokens: int
+    deadline_seconds: int
+    max_new_tokens: int
+    investigate_max_new_tokens: int     # one JSON reply per runbook turn
+    primer_path: str
+    repeat_window_seconds: int          # same problem key triaged this recently -> `repeat`, no new report
+    max_per_hour: int                   # triage submissions; the rest wait
+    skip_resolved_after_seconds: int    # a waiting incident resolved this long ago -> `skipped`
+    # What a re-run can pick from: [{"name", "label", "max_prompt_tokens"}]. From the chart because gpu-scheduler has no
+    # models API, and each model's prompt limit depends on the context it is served with.
+    rerun_models: list[dict]
 
     @classmethod
-    def from_env(cls) -> "Config":
-        e = os.environ
-        fb = e.get("TRIAGE_FALLBACK", "gemma4-26b-a4b")
-        return cls(gpu_url=e.get("GPU_SCHEDULER_URL", cls.gpu_url), gpu_token=e.get("GPU_SCHEDULER_TOKEN", ""),
-                   model=e.get("TRIAGE_MODEL", cls.model), fallback=[m for m in fb.split(",") if m.strip()],
-                   fallback_after_seconds=int(e.get("TRIAGE_FALLBACK_AFTER_SECONDS", cls.fallback_after_seconds)),
-                   fallback_max_prompt_tokens=int(e.get("TRIAGE_FALLBACK_MAX_PROMPT_TOKENS",
-                                                        cls.fallback_max_prompt_tokens)),
-                   deadline_seconds=int(e.get("TRIAGE_DEADLINE_SECONDS", cls.deadline_seconds)),
-                   max_new_tokens=int(e.get("TRIAGE_MAX_NEW_TOKENS", cls.max_new_tokens)),
-                   investigate_max_new_tokens=int(e.get("TRIAGE_INVESTIGATE_MAX_NEW_TOKENS",
-                                                        cls.investigate_max_new_tokens)),
-                   primer_path=e.get("PRIMER_PATH", cls.primer_path),
-                   repeat_window_seconds=int(e.get("TRIAGE_REPEAT_WINDOW_SECONDS", cls.repeat_window_seconds)),
-                   max_per_hour=int(e.get("TRIAGE_MAX_PER_HOUR", cls.max_per_hour)),
-                   skip_resolved_after_seconds=int(e.get("TRIAGE_SKIP_RESOLVED_AFTER_SECONDS",
-                                                         cls.skip_resolved_after_seconds)))
+    def from_env(cls, env: Env) -> Config:
+        return cls(
+            gpu_url=env.str("GPU_SCHEDULER_URL"),
+            gpu_token=env.str("GPU_SCHEDULER_TOKEN"),
+            model=env.str("TRIAGE_MODEL"),
+            fallback=env.list("TRIAGE_FALLBACK"),
+            fallback_after_seconds=env.int("TRIAGE_FALLBACK_AFTER_SECONDS"),
+            fallback_max_prompt_tokens=env.int("TRIAGE_FALLBACK_MAX_PROMPT_TOKENS"),
+            deadline_seconds=env.int("TRIAGE_DEADLINE_SECONDS"),
+            max_new_tokens=env.int("TRIAGE_MAX_NEW_TOKENS"),
+            investigate_max_new_tokens=env.int("TRIAGE_INVESTIGATE_MAX_NEW_TOKENS"),
+            primer_path=env.str("PRIMER_PATH"),
+            repeat_window_seconds=env.int("TRIAGE_REPEAT_WINDOW_SECONDS"),
+            max_per_hour=env.int("TRIAGE_MAX_PER_HOUR"),
+            skip_resolved_after_seconds=env.int("TRIAGE_SKIP_RESOLVED_AFTER_SECONDS"),
+            rerun_models=env.json("TRIAGE_RERUN_MODELS") or [],
+        )
 
     def primer(self) -> str:
         """The environment primer (design §9.4): read on every use, so a ConfigMap update needs no restart."""
         p = Path(self.primer_path)
         return p.read_text().strip() if p.exists() else ""
-
-
-def rerun_models(env=os.environ) -> list[dict]:
-    """What a re-run can pick from, from the chart: gpu-scheduler has no models API, and each model's prompt limit
-    depends on the context it is served with: [{"name", "label", "max_prompt_tokens"}]."""
-    return json.loads(env.get("TRIAGE_RERUN_MODELS") or "[]")
 
 
 def estimate_tokens(messages: list[dict]) -> int:
@@ -150,10 +148,10 @@ class GpuScheduler:
 
 
 class Engine:
-    def __init__(self, conn, cfg: Config, k8s, gpu: GpuScheduler, notifier=None, library: Library | None = None,
-                 runner: Runner | None = None):
+    def __init__(self, conn, cfg: Config, k8s, gpu: GpuScheduler, notifier, runner: Runner,
+                 library: Library | None = None):
         self.conn, self.cfg, self.k8s, self.gpu, self.notifier = conn, cfg, k8s, gpu, notifier
-        self.library, self.runner = library, runner or Runner(k8s)
+        self.library, self.runner = library, runner
         self.stopping = False
         self.last_pass: float | None = None      # time of the last pass that completed, for /metrics
 
@@ -224,7 +222,7 @@ class Engine:
 
     def start_reruns(self) -> int:
         n = 0
-        limits = {m["name"]: m.get("max_prompt_tokens") for m in rerun_models()}
+        limits = {m["name"]: m.get("max_prompt_tokens") for m in self.cfg.rerun_models}
         for inc in db.incidents_with_status(self.conn, "rerun", limit=200):
             stored = [e for e in db.get_incident(self.conn, inc["id"])["evidence"] if e["trigger"] not in ("pre", "post")]
             rb = self.library.match(inc["labels"]) if self.library else None

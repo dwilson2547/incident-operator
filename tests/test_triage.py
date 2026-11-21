@@ -8,9 +8,11 @@ from fastapi.testclient import TestClient
 
 from incident_operator import db
 from incident_operator.app import create_ui_app, create_webhook_app
-from incident_operator.notify import Notifier, SmtpConfig, compose
-from incident_operator.triage import PROMPT_VERSION, Config, Engine, build_messages
+from incident_operator.notify import Notifier, compose
+from incident_operator.ops import Runner
+from incident_operator.triage import PROMPT_VERSION, Engine, build_messages
 from test_evidence import EVENTS, POD, FakeK8s
+from testconfig import smtp_config, triage_config, ui_settings
 
 pytestmark = needs_pg
 
@@ -53,7 +55,8 @@ def k8s():
 def engine(conn, gpu, mail, tmp_path):
     primer = tmp_path / "primer.md"
     primer.write_text("Exit 65 = Broken: permanent.")
-    return Engine(conn, Config(primer_path=str(primer)), k8s(), gpu, mail)
+    cluster = k8s()
+    return Engine(conn, triage_config(primer_path=str(primer)), cluster, gpu, mail, Runner(cluster))
 
 
 def test_intake_dedupes_and_resolves(conn):
@@ -124,7 +127,7 @@ def test_email_composition(conn):
     inc_id, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
     db.set_status(conn, inc_id, "analysed", analysis="Where it failed: the scraper.", analysis_model="qwen35-9b",
                   analysis_worker="ainode")
-    msg = compose(db.get_incident(conn, inc_id), SmtpConfig(sender="a@b", to=["c@d"], public_url="http://io.local"))
+    msg = compose(db.get_incident(conn, inc_id), smtp_config(sender="a@b", to=["c@d"], public_url="http://io.local"))
     assert msg["Subject"] == "[triage] KubePodCrashLooping · namespace=gyopart pod=x"
     body = msg.get_content()
     assert "Where it failed: the scraper." in body and "Answered by qwen35-9b on ainode" in body
@@ -148,15 +151,15 @@ def test_email_goes_through_smtp(conn):
     try:
         inc_id, _ = db.record_firing(conn, alert())
         db.set_status(conn, inc_id, "analysed", analysis="ok")
-        Notifier(SmtpConfig(host="127.0.0.1", port=port, starttls=False,
-                            sender="io@x", to=["me@x"])).send_incident(db.get_incident(conn, inc_id))
+        Notifier(smtp_config(host="127.0.0.1", port=port, starttls=False,
+                             sender="io@x", to=["me@x"])).send_incident(db.get_incident(conn, inc_id))
     finally:
         ctl.stop()
     assert got and got[0].rcpt_tos == ["me@x"] and b"[triage] KubePodCrashLooping" in got[0].content
 
 
 def test_webhook_and_ui_apps(conn):
-    with TestClient(create_webhook_app(URL)) as wh, TestClient(create_ui_app(URL)) as ui:
+    with TestClient(create_webhook_app(URL)) as wh, TestClient(create_ui_app(URL, ui_settings())) as ui:
         payload = {"version": "4", "status": "firing", "alerts": [alert("a", namespace="n", pod="p"), alert("b"),
                                                                     {"status": "firing", "labels": {}}]}
         assert wh.post("/alertmanager", json=payload).json() == {"opened": 2, "updated": 0, "resolved": 0}
@@ -181,7 +184,7 @@ def test_needs_runbook_leaves_out_incidents_a_runbook_now_matches(conn, tmp_path
     lib = Library(str(tmp_path / "runbooks"), None)
     lib.refresh()
     assert "crash-in-n" in lib.runbooks, lib.errors
-    with TestClient(create_webhook_app(URL)) as wh, TestClient(create_ui_app(URL, lib)) as ui:
+    with TestClient(create_webhook_app(URL)) as wh, TestClient(create_ui_app(URL, ui_settings(), lib)) as ui:
         wh.post("/alertmanager", json={"alerts": [alert("a", namespace="n", pod="p"), alert("b", namespace="m")]})
         # the runbook matches on namespace too, so only the incident in n is covered, not the alertname as a whole
         assert ui.get("/api/incidents").json()["needs_runbook"] == [
@@ -211,7 +214,7 @@ def test_flapping_alert_is_triaged_and_mailed_once(conn, tmp_path):
         db.record_firing(conn, alert(namespace="gyopart", pod="x"))
         e.step()
     assert len(gpu.submitted) == 1 and len(mail.sent) == 1
-    with TestClient(create_ui_app(URL)) as ui:
+    with TestClient(create_ui_app(URL, ui_settings())) as ui:
         d = ui.get("/api/incidents").json()
     assert [(i["id"], i["repeats"], i["repeats_open"]) for i in d["incidents"]] == [(first, 5, 1)]
     assert len(db.get_incident(conn, first)["repeats"]) == 5
@@ -288,7 +291,7 @@ def test_metrics_for_the_operators_own_alerts(conn):
 
 
 def test_long_prompts_skip_the_small_context_fallback():
-    from incident_operator.triage import Config, fits_fallback
-    cfg = Config()
+    from incident_operator.triage import fits_fallback
+    cfg = triage_config()
     assert fits_fallback([{"role": "user", "content": "x" * 30000}], cfg)               # ~10k tokens
     assert not fits_fallback([{"role": "user", "content": "x" * 60000}], cfg)           # ~20k: over the Mac's 16k

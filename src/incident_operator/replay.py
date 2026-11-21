@@ -3,8 +3,8 @@ prompts, and print the outcome next to what happened at the time.
 
     python -m incident_operator replay [--model M] [--runbooks DIR] [--operations DIR] [--live] ID [ID ...]
 
-Needs DATABASE_URL, GPU_SCHEDULER_URL and GPU_SCHEDULER_TOKEN (locally: port-forwards to the cluster's Postgres and
-gpu-scheduler). Runbooks and operations default to the working tree's chart files, so a runbook edit can be tried
+Needs the service's triage settings (local.env has them; DATABASE_URL, GPU_SCHEDULER_URL and GPU_SCHEDULER_TOKEN
+pointing at port-forwards to the cluster's Postgres and gpu-scheduler). Runbooks and operations default to the working tree's chart files, so a runbook edit can be tried
 before it is pushed.
 
 Operation results come from what was stored for the incident, never from the live cluster: the cluster has moved on,
@@ -13,20 +13,20 @@ different model can explore (the design accepts that). The primer is the working
 
 --live runs the checks against the cluster as it is now instead (KUBE_API_URL, e.g. `kubectl proxy`, and
 PROMETHEUS_URL), for trying a changed operation on an incident whose objects still exist. Probes don't run in live
-replay: PROBE_NAMESPACE is left unset, so they answer with an error.
+replay: the runner gets no probe namespace, so they answer with an error.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import time
 from pathlib import Path
 
 from . import db, investigate
 from .library import Library
 from .k8s import K8s
-from .ops import Result, Runner
+from .ops import Prometheus, Result, Runner
+from .settings import Env
 from .triage import Config, GpuScheduler
 
 CHART = Path(__file__).resolve().parents[2] / "helm" / "incident-operator" / "files"
@@ -111,7 +111,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--timeout", type=float, default=900)
     ap.add_argument("--live", action="store_true", help="run the checks against the cluster now (KUBE_API_URL)")
     a = ap.parse_args(argv)
-    cfg = Config.from_env()
+    env = Env()
+    cfg, url = Config.from_env(env), env.str("DATABASE_URL")
+    live = (env.str("KUBE_API_URL"), env.str("PROMETHEUS_URL")) if a.live else None
+    env.check()
     cfg.primer_path, cfg.fallback = a.primer, []
     if a.model:
         cfg.model = a.model
@@ -120,11 +123,9 @@ def main(argv: list[str]) -> int:
     lib.refresh()
     for path, err in lib.errors.items():
         print(f"! {path}: {err}")
-    conn = db.connect(os.environ["DATABASE_URL"])
-    runner = None
-    if a.live:
-        os.environ.pop("PROBE_NAMESPACE", None)
-        runner = Runner(K8s(base=os.environ["KUBE_API_URL"]))
+    conn = db.connect(url)
+    # Live checks get no probe namespace or image, so probes answer with an error rather than start Jobs.
+    runner = Runner(K8s(base=live[0]), Prometheus(live[1])) if live else None
     for i in a.ids:
         inc = db.get_incident(conn, i)
         if inc is None:

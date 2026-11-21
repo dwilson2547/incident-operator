@@ -2,6 +2,12 @@ image:
   repository: dwilson2547/incident-operator
   tag: latest
 
+# Every setting the service reads comes from here: the code has no defaults, and a missing one stops start-up.
+logLevel: INFO
+ports:
+  ui: 8080
+  webhook: 8081
+
 # The incident page. LAN-only unless tlsSecretName is set (then public). With oidc.issuer set, every page needs an
 # authentik sign-in and only signed-in users can approve fixes; without it the page is open and fixes can't be approved.
 ui:
@@ -18,6 +24,9 @@ triage:
   model: qwen35-9b
   fallback: gemma4-26b-a4b                # comma-separated; another model takes the job after fallbackAfterSeconds
   fallbackAfterSeconds: 60
+  # Longer prompts go to the main model only: the Mac's gemma4-26b-a4b is served with a 16k context (gpu-scheduler's
+  # values). Estimated at 3 characters a token.
+  fallbackMaxPromptTokens: 12000
   deadlineSeconds: 900
   maxNewTokens: 1024
   investigateMaxNewTokens: 1536           # per JSON turn of a runbook investigation
@@ -38,6 +47,7 @@ prometheusUrl: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
 smtp:
   host: smtp.gmail.com
   port: 587
+  starttls: true
   username: dwilson2547@gmail.com
   from: "incident-operator <dwilson2547@gmail.com>"
   to: dwilson2547@gmail.com
