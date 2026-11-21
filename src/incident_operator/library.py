@@ -28,6 +28,8 @@ from typing import Any
 
 import yaml
 
+from .k8s import node_by_instance
+
 log = logging.getLogger("incident_operator.library")
 
 # design §4.1, in tokens estimated as characters / 4
@@ -43,10 +45,21 @@ SCRAPEJOB_ACTIONS = ("run-now", "resume")          # the only annotations Annota
 AUTONOMY = ("suggest", "approve")                  # `auto` is phase 4
 # An expectation on a check's structured result: `<path> <op> <literal>`, e.g. `mount_nfs_dstate_total == 0`.
 EXPECT = re.compile(r"^\s*([\w.]+)\s*(==|!=|>=|<=|>|<)\s*(-?\d+(?:\.\d+)?|true|false|null|\"[^\"]*\")\s*$")
-LIMIT = re.compile(r"^(\d+)/(\d+)([mhd])$")
+LIMIT = re.compile(r"^(\d+)/(\d+[mhd])$")
+
+
+def seconds(span: str) -> int:
+    """A duration like 30s, 5m, 1h or 2d in seconds."""
+    m = re.fullmatch(r"(\d+)([smhd])", span)
+    if not m:
+        raise ValueError(f"bad duration {span!r}")
+    return int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
 
 
 def tokens(text: str) -> int:
+    """A runbook text's size against the design's budgets (§4.1), which are set in characters / 4. Not the prompt
+    estimate: triage.estimate_tokens counts characters / 3, because logs tokenize worse than prose and a prompt over
+    the model's context fails where a long description only costs a warning."""
     return (len(text) + 3) // 4
 
 
@@ -221,7 +234,7 @@ def _check_mutating(op: Operation, d: dict, params: set[str]) -> None:
         m = LIMIT.match(str(limits[k]))
         if not m:
             raise LoadError(f"limits.{k} must look like 1/1h, 3/24h or 2/30m")
-        op.limits[k] = (int(m.group(1)), int(m.group(2)) * {"m": 60, "h": 3600, "d": 86400}[m.group(3)])
+        op.limits[k] = (int(m.group(1)), seconds(m.group(2)))
 
 
 def _check_run(run: dict, params: set[str]) -> None:
@@ -465,13 +478,8 @@ def resolve_target(runbook: Runbook, labels: dict[str, str], k8s) -> dict | None
     if not t:
         return None
     if t.get("from") == "instanceToNode":
-        ip = (labels.get("instance") or "").rsplit(":", 1)[0]
-        if not ip or k8s is None:
-            return None
-        for n in k8s.get("/api/v1/nodes").get("items", []):
-            if any(a.get("address") == ip for a in n.get("status", {}).get("addresses", [])):
-                return {"kind": "Node", "name": n["metadata"]["name"]}
-        return None                                    # e.g. Tower: not a node, so no node-targeted operation
+        node = node_by_instance(k8s, labels.get("instance") or "") if k8s is not None else None
+        return {"kind": "Node", "name": node} if node else None    # e.g. Tower: not a node, no node-targeted operation
     name = labels.get(t["name"])
     if not name:
         return None

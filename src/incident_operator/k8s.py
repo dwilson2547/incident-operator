@@ -33,6 +33,17 @@ class _ServiceAccountToken:
         return self._token
 
 
+def node_by_instance(k8s: K8s, instance: str) -> str | None:
+    """The cluster node whose address is an `instance` label's host (node-exporter's "IP:9100"), if any."""
+    ip = instance.rsplit(":", 1)[0]
+    if not ip:
+        return None
+    for n in k8s.get("/api/v1/nodes").get("items", []):
+        if any(a.get("address") == ip for a in n.get("status", {}).get("addresses", [])):
+            return n["metadata"]["name"]
+    return None
+
+
 class K8s:
     def __init__(self, base: str | None = None, token: str | None = None, verify: Any = True):
         """In the cluster (no `base`), use the service account's API address, token and CA. Otherwise talk to `base`,

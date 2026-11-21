@@ -27,6 +27,7 @@ from .k8s import K8s
 from .library import Library
 from .ops import Prometheus, Result, Runner
 from .settings import Env
+from .text import error_text
 from .triage import Config, GpuScheduler
 
 CHART = Path(__file__).resolve().parents[2] / "helm" / "incident-operator" / "files"
@@ -55,8 +56,7 @@ def replay_runbook(inc: dict, lib: Library, gpu: GpuScheduler, cfg: Config, time
     rb = lib.match(inc["labels"])
     if rb is None:
         return {"error": "no runbook in the working tree matches this alert"}
-    stored = {e["operation"]: Result(e["operation"], e["source"], e["content"], e["data"], e["truncated"], e["error"])
-              for e in inc["evidence"] if e["operation"]}
+    stored = {e["operation"]: Result.from_evidence(e) for e in inc["evidence"] if e["operation"]}
     if runner is not None:                    # --live: what the checks say now, earlier results feeding later params
         ran: dict[str, Result] = {}
 
@@ -139,7 +139,7 @@ def main(argv: list[str]) -> int:
             now = (replay_runbook(inc, lib, gpu, cfg, a.timeout, runner, related) if lib.match(inc["labels"])
                    else replay_triage(inc, gpu, cfg, a.timeout))
         except Exception as e:
-            now = {"error": f"{type(e).__name__}: {e}"}
+            now = {"error": error_text(e)}
         print(f"\n=== #{i} {inc['alertname']} {inc['labels'].get('namespace', '')}")
         print("--- then:\n" + json.dumps({k: v for k, v in then.items() if v}, indent=1, ensure_ascii=False))
         print("--- now:\n" + json.dumps(now, indent=1, ensure_ascii=False))

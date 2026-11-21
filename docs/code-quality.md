@@ -28,15 +28,21 @@ any of these: the test suite (with a test Postgres, see README: Develop) must pa
 
 ## 4. Duplication
 
-- [ ] `_cap` is in both `evidence.py` and `ops.py`.
-- [ ] The alert header is built in both `triage.build_messages` and `investigate.alert_block`.
-- [ ] Node-by-`instance`-IP lookup is in both `evidence._node_by_instance` and `library.resolve_target`.
-- [ ] Workload kind / plural / API group is spelled three ways (`evidence.collect`, `WORKLOAD_KINDS`, `ops._summary`).
-- [ ] A stored evidence row is turned back into a `Result` in three places (triage twice, replay).
-- [ ] Results are stored as evidence by both `Engine._store` and `fixes.store`.
-- [ ] Durations (`s/m/h/d`) are parsed by both `ops._seconds` and `library.LIMIT`.
-- [ ] `f"{type(e).__name__}: {e}"[:N]` is written out about six times, with different N.
-- [ ] Prompt tokens are estimated as chars/3 in triage and chars/4 in library: one function, or say why they differ.
+- [x] `_cap` is in both `evidence.py` and `ops.py`: one `text.cap`.
+- [x] The alert header is built in both `triage.build_messages` and `investigate.alert_block`: triage calls
+  `alert_block`.
+- [x] Node-by-`instance`-IP lookup is in both `evidence._node_by_instance` and `library.resolve_target`: one
+  `k8s.node_by_instance`.
+- [x] Workload kind / plural / API group is spelled three ways (`evidence.collect`, `WORKLOAD_KINDS`, `ops._summary`):
+  one `evidence.WORKLOADS`, and `for_workload` takes the object kind.
+- [x] A stored evidence row is turned back into a `Result` in three places (triage twice, replay):
+  `Result.from_evidence`.
+- [x] Results are stored as evidence by both `Engine._store` and `fixes.store`: one `db.add_results`.
+- [x] Durations (`s/m/h/d`) are parsed by both `ops._seconds` and `library.LIMIT`: one `library.seconds`.
+- [x] `f"{type(e).__name__}: {e}"[:N]` is written out about six times, with different N: `text.error_text(e, N)`;
+  the limits stay per caller (an evidence item, an operation, a fix run).
+- [x] Prompt tokens are estimated as chars/3 in triage and chars/4 in library: they differ on purpose (a prompt
+  over the context fails, a long runbook text only warns), now said in `library.tokens`.
 
 ## 5. Strings for state
 

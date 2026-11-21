@@ -16,7 +16,8 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .k8s import K8s
+from .k8s import K8s, node_by_instance
+from .text import cap, error_text
 
 log = logging.getLogger("incident_operator.evidence")
 
@@ -43,10 +44,9 @@ def collect(k8s: K8s, labels: dict[str, str]) -> list[Item]:
         steps.append(lambda: for_pod(k8s, ns, labels["pod"], labels.get("container")))
     if ns and labels.get("job_name"):
         steps.append(lambda: for_job(k8s, ns, labels["job_name"]))
-    for kind, plural, api in (("deployment", "deployments", "apps/v1"), ("statefulset", "statefulsets", "apps/v1"),
-                              ("daemonset", "daemonsets", "apps/v1")):
-        if ns and labels.get(kind):
-            steps.append(lambda k=kind, p=plural, a=api: for_workload(k8s, ns, k, p, a, labels[k]))
+    for kind in WORKLOADS:                                       # the alert label is the kind in lower case
+        if ns and labels.get(kind.lower()):
+            steps.append(lambda k=kind: for_workload(k8s, ns, k, labels[k.lower()]))
     node = labels.get("node")
     if not node and labels.get("instance"):
         steps.append(lambda: _node_by_instance(k8s, labels["instance"]))
@@ -60,7 +60,7 @@ def collect(k8s: K8s, labels: dict[str, str]) -> list[Item]:
             got = step()
         except Exception as e:                                   # one failed read doesn't lose the rest
             log.warning("evidence step failed: %s", e)
-            got = [Item("error", "collecting evidence", None, error=f"{type(e).__name__}: {e}"[:300])]
+            got = [Item("error", "collecting evidence", None, error=error_text(e, 300))]
         for it in got:
             size = len(it.content or "")
             if used + size > BUDGET_CHARS:
@@ -85,26 +85,20 @@ def collapse_repeats(text: str) -> str:
     return "\n".join(out)
 
 
-def _cap(text: str, limit: int = ITEM_CHARS, tail: bool = False) -> tuple[str, bool]:
-    if len(text) <= limit:
-        return text, False
-    return (("…" + text[-limit:]) if tail else (text[:limit] + "…")), True
-
-
 def _events(k8s: K8s, ns: str, kind: str, name: str) -> Item:
     source = f"events for {kind} {ns}/{name}"
     try:
         evs = k8s.get(f"/api/v1/namespaces/{ns}/events",
                       {"fieldSelector": f"involvedObject.name={name},involvedObject.kind={kind}"})["items"]
     except Exception as e:
-        return Item("events", source, None, error=f"{type(e).__name__}: {e}"[:300])
+        return Item("events", source, None, error=error_text(e, 300))
     if not evs:
         return Item("events", source, "(no events: they expire after an hour)")
     evs.sort(key=lambda e: e.get("lastTimestamp") or e.get("eventTime") or e["metadata"].get("creationTimestamp") or "")
     lines = [f"{e.get('lastTimestamp') or e.get('eventTime') or ''} {e.get('type', '')} {e.get('reason', '')}: "
              f"{(e.get('message') or '').strip()}" + (f" (x{e['count']})" if e.get("count", 1) > 1 else "")
              for e in evs[-EVENTS:]]
-    text, cut = _cap("\n".join(lines))
+    text, cut = cap("\n".join(lines), ITEM_CHARS)
     return Item("events", source, text, cut)
 
 
@@ -134,7 +128,7 @@ def for_pod(k8s: K8s, ns: str, name: str, container: str | None = None, log_char
             restarted.append(cs["name"])
     limits = [f"{c['name']}: {c.get('resources', {}).get('limits', {})}" for c in p["spec"].get("containers", [])]
     lines.append("limits: " + "; ".join(limits))
-    text, cut = _cap("\n".join(lines))
+    text, cut = cap("\n".join(lines), ITEM_CHARS)
     items = [Item("pod", f"pod {ns}/{name}", text, cut), _events(k8s, ns, "Pod", name)]
     names = [container] if container else [c["name"] for c in p["spec"].get("containers", [])]
     for c in names[:2]:
@@ -150,8 +144,8 @@ def _logs(k8s: K8s, ns: str, pod: str, container: str, previous: bool, limit: in
         text = k8s.get(f"/api/v1/namespaces/{ns}/pods/{pod}/log",
                        {"container": container, "tailLines": LOG_LINES, "previous": str(previous).lower()}, text=True)
     except Exception as e:
-        return Item("logs", source, None, error=f"{type(e).__name__}: {e}"[:300])
-    text, cut = _cap(collapse_repeats(text.strip()) or "(empty)", limit, tail=True)
+        return Item("logs", source, None, error=error_text(e, 300))
+    text, cut = cap(collapse_repeats(text.strip()) or "(empty)", limit, tail=True)
     return Item("logs", source, text, cut)
 
 
@@ -165,7 +159,7 @@ def for_job(k8s: K8s, ns: str, name: str) -> list[Item]:
              f"activeDeadlineSeconds={j['spec'].get('activeDeadlineSeconds')}"]
     for c in st.get("conditions", []):
         lines.append(f"condition {c['type']}={c['status']} {c.get('reason', '')}: {c.get('message', '')}".rstrip(": "))
-    items = [Item("job", f"job {ns}/{name}", _cap("\n".join(lines))[0]), _events(k8s, ns, "Job", name)]
+    items = [Item("job", f"job {ns}/{name}", cap("\n".join(lines), ITEM_CHARS)[0]), _events(k8s, ns, "Job", name)]
     pods = sorted(k8s.get(f"/api/v1/namespaces/{ns}/pods", {"labelSelector": f"job-name={name}"})["items"],
                   key=lambda p: p["metadata"].get("creationTimestamp", ""))
     if pods:
@@ -176,7 +170,7 @@ def for_job(k8s: K8s, ns: str, name: str) -> list[Item]:
                     + "; ".join(f"{cs['name']} {_state(cs.get('state'))}"
                                 for cs in p.get("status", {}).get("containerStatuses", []))
                     for p in pods]
-        items.append(Item("pod", f"attempts of job {ns}/{name}, oldest first", _cap("\n".join(attempts))[0]))
+        items.append(Item("pod", f"attempts of job {ns}/{name}, oldest first", cap("\n".join(attempts), ITEM_CHARS)[0]))
         first_failed = next((p for p in pods if p.get("status", {}).get("phase") == "Failed"), None)
         shown = ([first_failed] if first_failed is not None and first_failed is not pods[-1] else []) + [pods[-1]]
         for p in shown:                               # two pods share what one would get, so the op's budget holds both
@@ -186,8 +180,14 @@ def for_job(k8s: K8s, ns: str, name: str) -> list[Item]:
     return items
 
 
-def for_workload(k8s: K8s, ns: str, kind: str, plural: str, api: str, name: str) -> list[Item]:
-    """A Deployment's, StatefulSet's or DaemonSet's status and events (`kind` lower-case, as in the alert label)."""
+# Object kind -> (API group/version, resource plural), for the workloads evidence reads.
+WORKLOADS = {"Deployment": ("apps/v1", "deployments"), "StatefulSet": ("apps/v1", "statefulsets"),
+             "DaemonSet": ("apps/v1", "daemonsets")}
+
+
+def for_workload(k8s: K8s, ns: str, kind: str, name: str) -> list[Item]:
+    """A Deployment's, StatefulSet's or DaemonSet's status and events (`kind` as in WORKLOADS)."""
+    api, plural = WORKLOADS[kind]
     w = k8s.get(f"/apis/{api}/namespaces/{ns}/{plural}/{name}")
     st = w.get("status", {})
     fields = ("replicas", "readyReplicas", "updatedReplicas", "availableReplicas", "unavailableReplicas",
@@ -195,11 +195,8 @@ def for_workload(k8s: K8s, ns: str, kind: str, plural: str, api: str, name: str)
     lines = [" ".join(f"{f}={st[f]}" for f in fields if f in st)]
     for c in st.get("conditions", []):
         lines.append(f"condition {c['type']}={c['status']} {c.get('reason', '')}: {c.get('message', '')}".rstrip(": "))
-    return [Item(kind, f"{kind} {ns}/{name}", _cap("\n".join(lines))[0]),
-            _events(k8s, ns, WORKLOAD_KINDS[kind], name)]
-
-
-WORKLOAD_KINDS = {"deployment": "Deployment", "statefulset": "StatefulSet", "daemonset": "DaemonSet"}  # event kinds
+    label = kind.lower()
+    return [Item(label, f"{label} {ns}/{name}", cap("\n".join(lines), ITEM_CHARS)[0]), _events(k8s, ns, kind, name)]
 
 
 def for_node(k8s: K8s, name: str) -> list[Item]:
@@ -210,16 +207,13 @@ def for_node(k8s: K8s, name: str) -> list[Item]:
     alloc = n.get("status", {}).get("allocatable", {})
     lines.append(f"allocatable: cpu={alloc.get('cpu')} memory={alloc.get('memory')} "
                  f"gpu={alloc.get('nvidia.com/gpu', 0)}")
-    return [Item("node", f"node {name}", _cap("\n".join(lines))[0]), _events(k8s, "default", "Node", name)]
+    return [Item("node", f"node {name}", cap("\n".join(lines), ITEM_CHARS)[0]), _events(k8s, "default", "Node", name)]
 
 
 def _node_by_instance(k8s: K8s, instance: str) -> list[Item]:
     """node-exporter alerts carry instance="IP:9100" and no node name (design §5.4)."""
-    ip = instance.rsplit(":", 1)[0]
-    for n in k8s.get("/api/v1/nodes")["items"]:
-        if any(a.get("address") == ip for a in n.get("status", {}).get("addresses", [])):
-            return for_node(k8s, n["metadata"]["name"])
-    return []                                                    # not a cluster node (e.g. Tower)
+    node = node_by_instance(k8s, instance)
+    return for_node(k8s, node) if node else []                   # not a cluster node (e.g. Tower)
 
 
 def render(items: list[Item]) -> str:

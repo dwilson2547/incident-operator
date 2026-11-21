@@ -110,12 +110,6 @@ def run_checks(runner: Runner, library, checks: list[Check], incident: dict) -> 
     return ok, results, lines
 
 
-def store(conn, incident_id: int, results: list[Result], trigger: str) -> None:
-    for r in results:
-        db.add_evidence(conn, incident_id, r.operation, r.source, r.text, r.truncated, r.error,
-                        trigger=trigger, operation=r.operation, data=r.data)
-
-
 def step(conn, library, runner: Runner) -> int:
     """One pass: pre-check approved runs, post-check settled ones, time out runs the executor never took."""
     n = 0
@@ -134,7 +128,7 @@ def step(conn, library, runner: Runner) -> int:
             db.update_op_run(conn, run["id"], "refused", error=why)
             continue
         ok, results, lines = run_checks(runner, library, op.pre, inc) if op.pre else (True, [], [])
-        store(conn, inc["id"], results, "pre")
+        db.add_results(conn, inc["id"], results, "pre")
         if not ok:
             db.update_op_run(conn, run["id"], "refused", checks="\n".join(lines),
                              error="a pre-check failed: the situation isn't what the fix is for (any more)")
@@ -149,7 +143,7 @@ def step(conn, library, runner: Runner) -> int:
             db.update_op_run(conn, run["id"], "post_failed", error="the operation is no longer loaded: not verified")
             continue
         ok, results, lines = run_checks(runner, library, op.post, inc)
-        store(conn, inc["id"], results, "post")
+        db.add_results(conn, inc["id"], results, "post")
         prior = run.get("checks") or ""
         db.update_op_run(conn, run["id"], "succeeded" if ok else "post_failed",
                          checks=(prior + "\n" if prior else "") + "\n".join(lines),

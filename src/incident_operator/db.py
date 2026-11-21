@@ -18,12 +18,15 @@ import json
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import psycopg
 from psycopg import sql
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
+
+if TYPE_CHECKING:
+    from .ops import Result
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS incidents (
@@ -324,6 +327,13 @@ def add_evidence(conn: Conn, incident_id: int, kind: str, source: str, content: 
         (incident_id, kind, source, content, truncated, error, trigger, operation, round,
          Jsonb(data) if _jsonable(data) else None),
     )
+
+
+def add_results(conn: Conn, incident_id: int, results: list[Result], trigger: str, round: int | None = None) -> None:
+    """Operation results as evidence rows: what the page shows and what a re-run reads back (Result.from_evidence)."""
+    for r in results:
+        add_evidence(conn, incident_id, r.operation, r.source, r.text, r.truncated, r.error,
+                     trigger=trigger, operation=r.operation, round=round, data=r.data)
 
 
 def add_turn(conn: Conn, incident_id: int, *, session: str, prompt_version: str, model: str,

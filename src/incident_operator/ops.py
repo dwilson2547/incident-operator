@@ -14,8 +14,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import evidence
-from .library import Operation
+from .library import Operation, seconds
 from .settings import Env
+from .text import cap, error_text
 
 log = logging.getLogger("incident_operator.ops")
 
@@ -32,6 +33,11 @@ class Result:
     data: Any = None         # structured result, for result:<op>.<path> params
     truncated: bool = False
     error: str | None = None
+
+    @classmethod
+    def from_evidence(cls, e: dict) -> Result:
+        """A result stored as an evidence row, read back (generic evidence has a kind but no operation)."""
+        return cls(e["operation"] or e["kind"], e["source"], e["content"], e["data"], e["truncated"], e["error"])
 
 
 class Prometheus:
@@ -99,12 +105,6 @@ def fill(template: Any, params: dict[str, str], escape=lambda v: v) -> Any:
 
 def _promql_escape(v: str) -> str:
     return v.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def _cap(text: str, limit: int, tail: bool = False) -> tuple[str, bool]:
-    if len(text) <= limit:
-        return text, False
-    return (("…" + text[-limit:]) if tail else (text[:limit] + "…")), True
 
 
 def probe_job(name: str, node: str, probe: str, image: str, deadline: int) -> dict:
@@ -175,9 +175,9 @@ class Runner:
                 res = self._logs(op, params)
         except Exception as e:                          # one failed read never stops the incident
             log.info("operation %s failed: %s", op.name, e)
-            return Result(op.name, op.name, None, error=f"{type(e).__name__}: {e}"[:400])
+            return Result(op.name, op.name, None, error=error_text(e, 400))
         if res.text is not None:
-            res.text, cut = _cap(res.text, op.budget_chars, tail=kind == "k8s-logs")
+            res.text, cut = cap(res.text, op.budget_chars, tail=kind == "k8s-logs")
             res.truncated = res.truncated or cut
         return res
 
@@ -197,8 +197,7 @@ class Runner:
         elif kind == "Node":
             items = evidence.for_node(self.k8s, name)
         else:
-            plural = {"Deployment": "deployments", "StatefulSet": "statefulsets", "DaemonSet": "daemonsets"}[kind]
-            items = evidence.for_workload(self.k8s, ns, kind.lower(), plural, "apps/v1", name)
+            items = evidence.for_workload(self.k8s, ns, kind, name)
         if not op.run.get("logs", True):
             items = [i for i in items if i.kind != "logs"]
         res = self._items(op, items)
@@ -300,7 +299,7 @@ class Runner:
                                                    for r in res[:SERIES_MAX]) or " (no data)"))
             else:
                 end = time.time()
-                start = end - _seconds(run["range"])
+                start = end - seconds(run["range"])
                 res = self.prom.get("/api/v1/query_range", {"query": expr, "start": start, "end": end,
                                                             "step": run["step"]})["result"]
                 data[qname] = [{"metric": r["metric"], "last": float(r["values"][-1][1])} for r in res if r["values"]]
@@ -328,13 +327,6 @@ def _series(metric: dict) -> str:
 def _num(v) -> str:
     f = float(v)
     return f"{f:.0f}" if abs(f) >= 100 else f"{f:.3g}"
-
-
-def _seconds(span: str) -> int:
-    m = re.fullmatch(r"(\d+)([smhd])", span)
-    if not m:
-        raise ValueError(f"bad duration {span!r}")
-    return int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
 
 
 def _compact(v: Any) -> str:

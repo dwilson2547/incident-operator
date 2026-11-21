@@ -19,6 +19,7 @@ from .k8s import K8s
 from .library import SCRAPEJOB_ACTIONS, Library, Operation
 from .ops import fill
 from .settings import Env
+from .text import error_text
 
 log = logging.getLogger("incident_operator.executor")
 
@@ -96,7 +97,7 @@ def step(conn, library: Library, k8s: K8s) -> int:
         result = perform(k8s, op, run["params"], run["id"])
     except Exception as e:
         log.warning("fix run %s (%s) failed: %s", run["id"], run["operation"], e)
-        db.update_op_run(conn, run["id"], "failed", error=f"{type(e).__name__}: {e}"[:500])
+        db.update_op_run(conn, run["id"], "failed", error=error_text(e, 500))
         return 1
     db.update_op_run(conn, run["id"], "settling", result=result, settle_seconds=op.settle_seconds)
     log.info("fix run %s (%s): %s; post-checks in %ss", run["id"], op.name, result, op.settle_seconds)

@@ -100,16 +100,7 @@ def estimate_tokens(messages: list[dict]) -> int:
 
 def build_messages(incident: dict, evidence_text: str, primer: str, related: str = "") -> list[dict]:
     system = SYSTEM_PROMPT + ("\n\n" + primer if primer else "") + "\n\n" + ANSWER_FORMAT
-    labels = incident["labels"]
-    ann = incident["annotations"] or {}
-    shown = {k: v for k, v in labels.items() if k not in ("alertname", "severity", "prometheus")}
-    lines = [f"Alert: {incident['alertname']} (severity: {incident.get('severity') or 'unknown'}), firing since "
-             f"{incident.get('starts_at') or incident['first_seen']}",
-             "Labels: " + ", ".join(f"{k}={v}" for k, v in sorted(shown.items()))]
-    for key in ("summary", "description", "message"):
-        if ann.get(key):
-            lines.append(f"{key.capitalize()}: {ann[key]}")
-    user = ("\n".join(lines) + ("\n\n" + related if related else "")
+    user = (investigate.alert_block(incident, None) + ("\n\n" + related if related else "")
             + "\n\nEvidence collected from the cluster:\n\n" + evidence_text)
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -236,8 +227,7 @@ class Engine:
             rb = self.library.match(inc["labels"]) if self.library else None
             related = self._related(inc)
             if rb:
-                results = [Result(e["operation"] or e["kind"], e["source"], e["content"], e["data"], e["truncated"],
-                                  e["error"]) for e in stored]
+                results = [Result.from_evidence(e) for e in stored]
                 messages = investigate.first_messages(
                     inc, rb, inc["target"], results, "(nothing: finish now)", self.cfg.primer(), related, rounds=0,
                     budget=investigate.PRECURSOR_CHARS + 2 * investigate.REQUESTED_CHARS)
@@ -302,11 +292,6 @@ class Engine:
             out.append(r)
         return out
 
-    def _store(self, incident_id: int, results: list[Result], trigger: str, round: int | None = None) -> None:
-        for r in results:
-            db.add_evidence(self.conn, incident_id, r.operation, r.source, r.text, r.truncated, r.error,
-                            trigger=trigger, operation=r.operation, round=round, data=r.data)
-
     def _start_runbook(self, inc: dict, rb) -> bool:
         try:
             target = resolve_target(rb, inc["labels"], self.k8s)
@@ -323,7 +308,7 @@ class Engine:
         except Exception as e:                        # stays `new`; precursors run again next pass (read-only)
             log.warning("submit for incident %s failed: %s", inc["id"], e)
             return False
-        self._store(inc["id"], precursors, "precursor")
+        db.add_results(self.conn, inc["id"], precursors, "precursor")
         self._add_turn(inc, messages, job_id, session="investigation", prompt_version=investigate.PROMPT_VERSION,
                        turn=1, json_schema=schema)
         db.set_status(self.conn, inc["id"], "investigating", runbook=rb.name, runbook_rev=rb.rev, target=target)
@@ -383,8 +368,7 @@ class Engine:
         # Checks listed with "done" still run while rounds remain: seen in prod (a 9B listed the log it needed and
         # finished anyway). Read-only, so running one too many costs a turn, never a change.
         if asked and n < investigate.MAX_ROUNDS and not inc.get("rerun_model"):   # a re-run never reads the cluster
-            earlier = {e["operation"]: Result(e["operation"], e["source"], e["content"], e["data"], e["truncated"],
-                                              e["error"]) for e in inc["evidence"] if e["operation"]}
+            earlier = {e["operation"]: Result.from_evidence(e) for e in inc["evidence"] if e["operation"]}
             run = [a for a in asked if a in menu]
             results = self._run_ops(run, inc["target"], inc["labels"], earlier)
             messages = investigate.next_messages(turn["messages"], res.get("text", ""), results,
@@ -396,7 +380,7 @@ class Engine:
                 log.warning("submit of turn %d for incident %s failed: %s", n + 1, inc["id"], e)
                 return 0
             db.finish_turn(self.conn, turn["id"], **done)
-            self._store(inc["id"], results, "requested", round=n)
+            db.add_results(self.conn, inc["id"], results, "requested", round=n)
             self._add_turn(inc, messages, job_id, session="investigation", prompt_version=investigate.PROMPT_VERSION,
                            turn=n + 1, json_schema=schema)
             log.info("incident %s: turn %d asked for %s", inc["id"], n, asked)
