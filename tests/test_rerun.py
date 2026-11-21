@@ -12,6 +12,7 @@ from incident_operator import db, investigate
 from incident_operator.app import create_ui_app
 from incident_operator.investigate import alert_subject, related_block
 from incident_operator.ops import Runner
+from incident_operator.states import FixStatus, IncidentStatus
 from incident_operator.triage import Engine
 
 
@@ -82,7 +83,7 @@ def test_investigation_and_remediation_both_see_other_alerts(conn, tmp_path):
     e = engine(conn, gpu, tmp_path)
     inc_id, _ = db.record_firing(conn, alert("main", namespace="n", pod="web-7d9f8-abcde"))
     before = fire(conn, "before", 1, alertname="ScrapeJobFailing", scrape_job="first", scraper="one")
-    db.set_status(conn, before["id"], "repeat")
+    db.set_status(conn, before["id"], IncidentStatus.REPEAT)
     e.start_new()
     assert "scrape_job=first" in gpu.submitted[0][0][1]["content"]
     fire(conn, "during", 2, alertname="ScrapeJobFailing", scrape_job="second", scraper="two")   # while it investigates
@@ -176,15 +177,15 @@ def test_rerun_doesnt_touch_the_brakes(conn, tmp_path):
 @needs_pg
 def test_rerun_supersedes_a_waiting_fix_and_refuses_while_one_runs(conn, tmp_path):
     e, gpu, inc_id = answered(conn, tmp_path)
-    rid = db.add_op_run(conn, inc_id, "op", "r", {}, "approve", "proposed")
+    rid = db.add_op_run(conn, inc_id, "op", "r", {}, "approve", FixStatus.PROPOSED)
     assert db.begin_rerun(conn, inc_id, "qwen35-9b", "dan") is None
     assert conn.execute("SELECT status, decided_by FROM op_runs WHERE id = %s", (rid,)).fetchone() == {
         "status": "superseded", "decided_by": None}
-    db.set_status(conn, inc_id, "analysed")
+    db.set_status(conn, inc_id, IncidentStatus.ANALYSED)
     conn.execute("UPDATE op_runs SET status = 'running' WHERE id = %s", (rid,))
     assert "under way" in db.begin_rerun(conn, inc_id, "qwen35-9b", "dan")
     conn.execute("UPDATE op_runs SET status = 'succeeded' WHERE id = %s", (rid,))
-    db.set_status(conn, inc_id, "investigating")
+    db.set_status(conn, inc_id, IncidentStatus.INVESTIGATING)
     assert "investigating" in db.begin_rerun(conn, inc_id, "qwen35-9b", "dan")
     assert db.begin_rerun(conn, 999999, "qwen35-9b", "dan") == "no such incident"
 

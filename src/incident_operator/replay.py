@@ -27,6 +27,7 @@ from .k8s import K8s
 from .library import Library
 from .ops import Prometheus, Result, Runner
 from .settings import Env
+from .states import Session
 from .text import error_text
 from .triage import Config, GpuScheduler
 
@@ -93,7 +94,7 @@ def replay_runbook(inc: dict, lib: Library, gpu: GpuScheduler, cfg: Config, time
 
 
 def replay_triage(inc: dict, gpu: GpuScheduler, cfg: Config, timeout: float) -> dict:
-    first = next((t for t in inc["turns"] if t["session"] == "triage"), None)
+    first = next((t for t in inc["turns"] if t["session"] == Session.TRIAGE), None)
     if first is None:
         return {"error": "no stored triage turn"}
     job = _wait(gpu, gpu.submit(first["messages"]), timeout)

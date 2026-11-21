@@ -34,6 +34,7 @@ from . import db, evidence, fixes, investigate
 from .library import Library, resolve_target
 from .ops import Result, Runner
 from .settings import Env
+from .states import CHECK_TRIGGERS, IncidentStatus, Session, Trigger, TurnStatus
 
 log = logging.getLogger("incident_operator.triage")
 
@@ -178,18 +179,18 @@ class Engine:
     def start_new(self) -> int:
         n = 0
         budget = self.cfg.max_per_hour - db.triages_since(self.conn, 3600)
-        for inc in db.incidents_with_status(self.conn, "new", limit=200):
+        for inc in db.incidents_with_status(self.conn, IncidentStatus.NEW, limit=200):
             prev = db.last_triaged(self.conn, inc["problem_key"], self.cfg.repeat_window_seconds, inc["id"])
             if prev:
                 orig = self.conn.execute("SELECT runbook FROM incidents WHERE id = %s", (prev,)).fetchone()
-                db.set_status(self.conn, inc["id"], "repeat", repeat_of=prev, runbook=orig["runbook"])
+                db.set_status(self.conn, inc["id"], IncidentStatus.REPEAT, repeat_of=prev, runbook=orig["runbook"])
                 log.info("incident %s (%s): repeat of %s, not triaged", inc["id"], inc["alertname"], prev)
                 n += 1
                 continue
             resolved = inc["alert_resolved_at"]
             if resolved and (datetime.now(UTC) - resolved).total_seconds() > self.cfg.skip_resolved_after_seconds:
                 rb = self.library.match(inc["labels"]) if self.library else None
-                db.set_status(self.conn, inc["id"], "skipped", runbook=rb.name if rb else None,
+                db.set_status(self.conn, inc["id"], IncidentStatus.SKIPPED, runbook=rb.name if rb else None,
                               error="Resolved before its turn: the hourly triage limit was reached.")
                 log.info("incident %s (%s): skipped, resolved while waiting", inc["id"], inc["alertname"])
                 n += 1
@@ -212,8 +213,8 @@ class Engine:
                 log.warning("submit for incident %s failed: %s", inc["id"], e)
                 self.conn.execute("DELETE FROM evidence WHERE incident_id = %s", (inc["id"],))
                 continue
-            self._add_turn(inc, messages, job_id, session="triage", prompt_version=PROMPT_VERSION)
-            db.set_status(self.conn, inc["id"], "triaging")
+            self._add_turn(inc, messages, job_id, session=Session.TRIAGE, prompt_version=PROMPT_VERSION)
+            db.set_status(self.conn, inc["id"], IncidentStatus.TRIAGING)
             budget -= 1
             log.info("incident %s (%s): %d evidence items, job %s", inc["id"], inc["alertname"], len(items), job_id)
             n += 1
@@ -222,8 +223,8 @@ class Engine:
     def start_reruns(self) -> int:
         n = 0
         limits = {m["name"]: m.get("max_prompt_tokens") for m in self.cfg.rerun_models}
-        for inc in db.incidents_with_status(self.conn, "rerun", limit=200):
-            stored = [e for e in db.incident(self.conn, inc["id"])["evidence"] if e["trigger"] not in ("pre", "post")]
+        for inc in db.incidents_with_status(self.conn, IncidentStatus.RERUN, limit=200):
+            stored = [e for e in db.incident(self.conn, inc["id"])["evidence"] if e["trigger"] not in CHECK_TRIGGERS]
             rb = self.library.match(inc["labels"]) if self.library else None
             related = self._related(inc)
             if rb:
@@ -232,18 +233,20 @@ class Engine:
                     inc, rb, inc["target"], results, "(nothing: finish now)", self.cfg.primer(), related, rounds=0,
                     budget=investigate.PRECURSOR_CHARS + 2 * investigate.REQUESTED_CHARS)
                 schema = investigate.investigation_schema([], final=True)
-                tokens, status = self.cfg.investigate_max_new_tokens, "investigating"
-                turn = dict(session="investigation", prompt_version=investigate.PROMPT_VERSION, json_schema=schema)
+                tokens, status = self.cfg.investigate_max_new_tokens, IncidentStatus.INVESTIGATING
+                turn = dict(session=Session.INVESTIGATION, prompt_version=investigate.PROMPT_VERSION,
+                            json_schema=schema)
             else:
                 items = [evidence.Item(e["kind"], e["source"], e["content"], e["truncated"], e["error"])
                          for e in stored]
                 messages = build_messages(inc, evidence.render(items), self.cfg.primer(), related)
-                schema, tokens, status = None, None, "triaging"
-                turn = dict(session="triage", prompt_version=PROMPT_VERSION)
+                schema, tokens, status = None, None, IncidentStatus.TRIAGING
+                turn = dict(session=Session.TRIAGE, prompt_version=PROMPT_VERSION)
             limit, size = limits.get(inc["rerun_model"]), estimate_tokens(messages)
             if limit and size > limit:
-                db.set_status(self.conn, inc["id"], "triage_failed", error=f"this prompt is about {size} tokens, over "
-                              f"{inc['rerun_model']}'s limit of {limit}: nothing was sent. Pick a larger model.")
+                db.set_status(self.conn, inc["id"], IncidentStatus.TRIAGE_FAILED,
+                              error=f"this prompt is about {size} tokens, over {inc['rerun_model']}'s limit of "
+                                    f"{limit}: nothing was sent. Pick a larger model.")
                 n += 1
                 continue
             try:
@@ -267,18 +270,19 @@ class Engine:
             except Exception as e:
                 log.warning("poll of job %s failed: %s", turn["gpu_job_id"], e)
                 continue
-            if job["status"] == "done" and turn["session"] != "triage":
+            if job["status"] == "done" and turn["session"] != Session.TRIAGE:
                 n += self._runbook_turn_done(turn, job)
             elif job["status"] == "done":
                 res = job.get("result") or {}
-                db.finish_turn(self.conn, turn["id"], status="done", result=res, ran_model=job.get("ran_model"),
-                               worker=job.get("worker"))
-                db.set_status(self.conn, turn["incident_id"], "analysed", analysis=(res.get("text") or "").strip(),
+                db.finish_turn(self.conn, turn["id"], status=TurnStatus.DONE, result=res,
+                               ran_model=job.get("ran_model"), worker=job.get("worker"))
+                db.set_status(self.conn, turn["incident_id"], IncidentStatus.ANALYSED,
+                              analysis=(res.get("text") or "").strip(),
                               analysis_model=job.get("ran_model") or turn["model"], analysis_worker=job.get("worker"))
                 n += 1
             elif job["status"] in ("failed", "cancelled"):
-                db.finish_turn(self.conn, turn["id"], status="failed", error=job.get("error"))
-                db.set_status(self.conn, turn["incident_id"], "triage_failed", error=job.get("error"))
+                db.finish_turn(self.conn, turn["id"], status=TurnStatus.FAILED, error=job.get("error"))
+                db.set_status(self.conn, turn["incident_id"], IncidentStatus.TRIAGE_FAILED, error=job.get("error"))
                 n += 1
         return n
 
@@ -308,10 +312,11 @@ class Engine:
         except Exception as e:                        # stays `new`; precursors run again next pass (read-only)
             log.warning("submit for incident %s failed: %s", inc["id"], e)
             return False
-        db.add_results(self.conn, inc["id"], precursors, "precursor")
-        self._add_turn(inc, messages, job_id, session="investigation", prompt_version=investigate.PROMPT_VERSION,
+        db.add_results(self.conn, inc["id"], precursors, Trigger.PRECURSOR)
+        self._add_turn(inc, messages, job_id, session=Session.INVESTIGATION, prompt_version=investigate.PROMPT_VERSION,
                        turn=1, json_schema=schema)
-        db.set_status(self.conn, inc["id"], "investigating", runbook=rb.name, runbook_rev=rb.rev, target=target)
+        db.set_status(self.conn, inc["id"], IncidentStatus.INVESTIGATING, runbook=rb.name, runbook_rev=rb.rev,
+                      target=target)
         log.info("incident %s (%s): runbook %s, target %s, %d precursors, job %s", inc["id"], inc["alertname"],
                  rb.name, target, len(precursors), job_id)
         return True
@@ -319,8 +324,8 @@ class Engine:
     def _runbook_turn_done(self, turn: dict, job: dict) -> int:
         res = job.get("result") or {}
         output = res.get("json")
-        done: dict[str, Any] = dict(status="done", result=res, ran_model=job.get("ran_model"), worker=job.get("worker"),
-                                    output=output)
+        done: dict[str, Any] = dict(status=TurnStatus.DONE, result=res, ran_model=job.get("ran_model"),
+                                    worker=job.get("worker"), output=output)
         inc = db.incident(self.conn, turn["incident_id"])
         if not isinstance(output, dict):
             limit = self.cfg.investigate_max_new_tokens
@@ -341,24 +346,24 @@ class Engine:
                 return 1
             db.finish_turn(self.conn, turn["id"], **done)
             why = f"hit the {limit}-token limit again on retry" if cut_off else "wasn't the JSON asked for"
-            db.set_status(self.conn, inc["id"], "triage_failed",
+            db.set_status(self.conn, inc["id"], IncidentStatus.TRIAGE_FAILED,
                           error=f"the model's {turn['session']} reply {why}: {res.get('text', '')[:200]}")
             return 1
-        if turn["session"] == "remediation":
+        if turn["session"] == Session.REMEDIATION:
             db.finish_turn(self.conn, turn["id"], **done)
             rb = self.library.runbooks.get(inc["runbook"]) if self.library else None
             name = output.get("operation")
             if rb and name in rb.fixes and name in self._lib.operations:   # the schema allows only these or "none"
                 fixes.propose(self.conn, inc, rb, self._lib.operations[name])
                 log.info("incident %s: proposed fix %s (%s)", inc["id"], name, rb.fixes[name])
-            db.set_status(self.conn, inc["id"], "analysed", advice=output,
+            db.set_status(self.conn, inc["id"], IncidentStatus.ANALYSED, advice=output,
                           analysis=investigate.render_analysis(inc["findings"], output),
                           analysis_model=job.get("ran_model") or turn["model"], analysis_worker=job.get("worker"))
             return 1
         rb = self.library.runbooks.get(inc["runbook"]) if self.library else None
         if rb is None:                                # the runbook was removed mid-incident: report what we have
             db.finish_turn(self.conn, turn["id"], **done)
-            db.set_status(self.conn, inc["id"], "analysed", findings=output.get("findings"),
+            db.set_status(self.conn, inc["id"], IncidentStatus.ANALYSED, findings=output.get("findings"),
                           analysis=investigate.render_analysis(output.get("findings") or {}, None),
                           analysis_model=job.get("ran_model") or turn["model"], analysis_worker=job.get("worker"))
             return 1
@@ -380,9 +385,9 @@ class Engine:
                 log.warning("submit of turn %d for incident %s failed: %s", n + 1, inc["id"], e)
                 return 0
             db.finish_turn(self.conn, turn["id"], **done)
-            db.add_results(self.conn, inc["id"], results, "requested", round=n)
-            self._add_turn(inc, messages, job_id, session="investigation", prompt_version=investigate.PROMPT_VERSION,
-                           turn=n + 1, json_schema=schema)
+            db.add_results(self.conn, inc["id"], results, Trigger.REQUESTED, round=n)
+            self._add_turn(inc, messages, job_id, session=Session.INVESTIGATION,
+                           prompt_version=investigate.PROMPT_VERSION, turn=n + 1, json_schema=schema)
             log.info("incident %s: turn %d asked for %s", inc["id"], n, asked)
             return 1
         findings = output.get("findings") or {}
@@ -397,9 +402,9 @@ class Engine:
             log.warning("submit of remediation for incident %s failed: %s", inc["id"], e)
             return 0
         db.finish_turn(self.conn, turn["id"], **done)
-        self._add_turn(inc, messages, job_id, session="remediation", prompt_version=investigate.PROMPT_VERSION,
+        self._add_turn(inc, messages, job_id, session=Session.REMEDIATION, prompt_version=investigate.PROMPT_VERSION,
                        turn=n + 1, json_schema=schema)
-        db.set_status(self.conn, inc["id"], "advising", findings=findings)
+        db.set_status(self.conn, inc["id"], IncidentStatus.ADVISING, findings=findings)
         log.info("incident %s: findings after %d turn(s), confidence %s", inc["id"], n, findings.get("confidence"))
         return 1
 

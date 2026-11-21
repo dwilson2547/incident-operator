@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from email.message import EmailMessage
 
 from .settings import Env
+from .states import FixStatus, IncidentStatus, Session, Trigger
 
 log = logging.getLogger("incident_operator.notify")
 
@@ -51,7 +52,7 @@ def compose(inc: dict, cfg: SmtpConfig) -> EmailMessage:
     labels = inc["labels"]
     t = inc.get("target")
     where = (f"{t['kind']} {t['namespace'] + '/' if t.get('namespace') else ''}{t['name']}" if t else target(labels))
-    ok = inc["status"] == "analysed"
+    ok = inc["status"] == IncidentStatus.ANALYSED
     msg = EmailMessage()
     msg["Subject"] = (f"[triage] {inc['alertname']}" + (f" · {where}" if where else "")
                       + ("" if ok else " (analysis failed)"))
@@ -65,26 +66,27 @@ def compose(inc: dict, cfg: SmtpConfig) -> EmailMessage:
         lines.append(ann["summary"])
     lines.append("")
     if ok:
-        turns = len({x.get("turn") for x in inc.get("turns") or [] if x.get("session") == "investigation"})
+        turns = len({x.get("turn") for x in inc.get("turns") or [] if x.get("session") == Session.INVESTIGATION})
         lines += [inc.get("analysis") or "(empty answer)", "",
                   f"Answered by {inc.get('analysis_model') or '?'} on {inc.get('analysis_worker') or '?'}"
                   + (f" after {turns} investigation turn{'s' if turns != 1 else ''}" if turns else "")
                   + ". Suggestion only: nothing was changed."]
         for f in inc.get("fixes") or []:
-            if f["status"] == "proposed":
+            if f["status"] == FixStatus.PROPOSED:
                 lines += ["", f"Proposed fix, waiting for your approval: {f['operation']}", f"  {f['command']}",
                           "  Approve or reject it on the incident page; pre-checks run when you approve."]
-            elif f["status"] == "suggested":
+            elif f["status"] == FixStatus.SUGGESTED:
                 lines += ["", f"Suggested fix (not run automatically; to do it yourself): {f['operation']}",
                           f"  {f['command']}"]
-            elif f["status"] == "refused":
+            elif f["status"] == FixStatus.REFUSED:
                 lines += ["", f"The model proposed {f['operation']}, but it can't run here: {f.get('error')}"]
     else:
         lines += [f"The model couldn't analyse this one: {inc.get('error') or 'unknown error'}."]
     ev = inc.get("evidence") or []
     if ev:
         lines += ["", "Evidence it was given:"] + [
-            f"  - {e.get('operation') or e['source']}" + (" (asked for)" if e.get("trigger") == "requested" else "")
+            f"  - {e.get('operation') or e['source']}"
+            + (" (asked for)" if e.get("trigger") == Trigger.REQUESTED else "")
             + (" (could not read)" if e.get("error") else "") for e in ev]
     lines += ["", f"Runbook: {inc['runbook']} ({inc.get('runbook_rev') or '?'})." if inc.get("runbook")
               else "No runbook covers this alert yet."]
@@ -94,8 +96,9 @@ def compose(inc: dict, cfg: SmtpConfig) -> EmailMessage:
     return msg
 
 
-FIX_OUTCOME = {"succeeded": "done, post-checks passed", "post_failed": "ran, but the post-checks FAILED",
-               "failed": "FAILED to run", "refused": "not run: refused", "rejected": "rejected"}
+FIX_OUTCOME = {FixStatus.SUCCEEDED: "done, post-checks passed",
+               FixStatus.POST_FAILED: "ran, but the post-checks FAILED", FixStatus.FAILED: "FAILED to run",
+               FixStatus.REFUSED: "not run: refused", FixStatus.REJECTED: "rejected"}
 
 
 def compose_fix(run: dict, inc: dict, cfg: SmtpConfig) -> EmailMessage:

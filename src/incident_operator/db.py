@@ -25,6 +25,21 @@ from psycopg import sql
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 
+from .states import (
+    ANSWERED,
+    FINAL,
+    RAN,
+    REACHED_CLUSTER,
+    SENT_TO_MODEL,
+    UNDER_WAY,
+    WAITING,
+    FixStatus,
+    IncidentStatus,
+    Session,
+    Trigger,
+    TurnStatus,
+)
+
 if TYPE_CHECKING:
     from .ops import Result
 
@@ -283,11 +298,11 @@ def last_triaged(conn: Conn, key: str | None, within_seconds: int, exclude_id: i
         """
         SELECT id FROM incidents
         WHERE problem_key = %s AND id <> %s
-          AND status IN ('triaging', 'investigating', 'advising', 'analysed', 'triage_failed', 'rerun')
+          AND status = ANY(%s)
           AND first_seen > now() - make_interval(secs => %s)
         ORDER BY first_seen DESC LIMIT 1
         """,
-        (key, exclude_id, within_seconds),
+        (key, exclude_id, list(SENT_TO_MODEL), within_seconds),
     ).fetchone()
     return row["id"] if row else None
 
@@ -297,11 +312,12 @@ def triages_since(conn: Conn, seconds: int) -> int:
     against alert storms: a re-run someone asked for doesn't count, so comparing models can't hold back a real alert."""
     return one(conn.execute(
         "SELECT count(*) AS n FROM model_turns"
-        " WHERE turn = 1 AND attempt = 1 AND session IN ('triage', 'investigation')"
-        " AND submitted_at > now() - make_interval(secs => %s)", (seconds,)))["n"]
+        " WHERE turn = 1 AND attempt = 1 AND session = ANY(%s)"
+        " AND submitted_at > now() - make_interval(secs => %s)",
+        ([Session.TRIAGE, Session.INVESTIGATION], seconds)))["n"]
 
 
-def incidents_with_status(conn: Conn, status: str, limit: int = 20) -> list[dict]:
+def incidents_with_status(conn: Conn, status: IncidentStatus, limit: int = 20) -> list[dict]:
     return conn.execute("SELECT * FROM incidents WHERE status = %s ORDER BY first_seen LIMIT %s",
                         (status, limit)).fetchall()
 
@@ -317,7 +333,7 @@ def _jsonable(v) -> bool:
 
 
 def add_evidence(conn: Conn, incident_id: int, kind: str, source: str, content: str | None,
-                 truncated: bool = False, error: str | None = None, *, trigger: str = "generic",
+                 truncated: bool = False, error: str | None = None, *, trigger: Trigger = Trigger.GENERIC,
                  operation: str | None = None, round: int | None = None, data=None) -> None:
     """`data` is the result's structured form, kept when it is JSON (anything else is stored as NULL; the text
     stays)."""
@@ -329,7 +345,8 @@ def add_evidence(conn: Conn, incident_id: int, kind: str, source: str, content: 
     )
 
 
-def add_results(conn: Conn, incident_id: int, results: list[Result], trigger: str, round: int | None = None) -> None:
+def add_results(conn: Conn, incident_id: int, results: list[Result], trigger: Trigger,
+                round: int | None = None) -> None:
     """Operation results as evidence rows: what the page shows and what a re-run reads back (Result.from_evidence)."""
     for r in results:
         add_evidence(conn, incident_id, r.operation, r.source, r.text, r.truncated, r.error,
@@ -351,17 +368,18 @@ def add_turn(conn: Conn, incident_id: int, *, session: str, prompt_version: str,
 
 
 def pending_turns(conn: Conn) -> list[dict]:
-    return conn.execute("SELECT * FROM model_turns WHERE status = 'submitted' ORDER BY submitted_at").fetchall()
+    return conn.execute("SELECT * FROM model_turns WHERE status = %s ORDER BY submitted_at",
+                        (TurnStatus.SUBMITTED,)).fetchall()
 
 
-def set_status(conn: Conn, incident_id: int, status: str, **fields) -> None:
+def set_status(conn: Conn, incident_id: int, status: IncidentStatus, **fields) -> None:
     sets = sql.SQL("").join(sql.SQL(", {} = %s").format(sql.Identifier(k)) for k in fields)
     vals = [Jsonb(v) if isinstance(v, (dict, list)) else v for v in fields.values()]
     conn.execute(sql.SQL("UPDATE incidents SET status = %s{} WHERE id = %s").format(sets),
                  (status, *vals, incident_id))
 
 
-def finish_turn(conn: Conn, turn_id: int, *, status: str, result: dict | None = None,
+def finish_turn(conn: Conn, turn_id: int, *, status: TurnStatus, result: dict | None = None,
                 ran_model: str | None = None, worker: str | None = None, error: str | None = None,
                 output: dict | None = None) -> None:
     conn.execute(
@@ -372,10 +390,6 @@ def finish_turn(conn: Conn, turn_id: int, *, status: str, result: dict | None = 
     )
 
 
-RERUNNABLE = ("analysed", "triage_failed")
-FIX_UNDER_WAY = ("approved", "ready", "running", "settling")
-
-
 def begin_rerun(conn: Conn, incident_id: int, model: str, who: str) -> str | None:
     """Queue a re-run with this model: keep the current answer in `earlier_attempts`, supersede a fix still waiting for
     a decision, and mark the incident mailed so the new answer isn't. Returns why it can't start, or None if it did."""
@@ -383,31 +397,31 @@ def begin_rerun(conn: Conn, incident_id: int, model: str, who: str) -> str | Non
         inc = conn.execute("SELECT * FROM incidents WHERE id = %s FOR UPDATE", (incident_id,)).fetchone()
         if inc is None:
             return "no such incident"
-        if inc["status"] not in RERUNNABLE:
+        if inc["status"] not in ANSWERED:
             return f"it is {inc['status']}: only an answered or failed incident can be re-run"
         if conn.execute("SELECT 1 FROM op_runs WHERE incident_id = %s AND status = ANY(%s) LIMIT 1",
-                        (incident_id, list(FIX_UNDER_WAY))).fetchone():
+                        (incident_id, list(UNDER_WAY))).fetchone():
             return "a fix is under way on this incident"
         earlier = {k: inc[k] for k in ("attempt", "status", "analysis", "analysis_model", "analysis_worker", "findings",
                                        "advice", "error", "runbook", "runbook_rev", "rerun_by")}
         earlier["replaced_at"] = datetime.now(UTC).isoformat()
         conn.execute(
-            "UPDATE op_runs SET status = 'superseded', finished_at = now()"
-            " WHERE incident_id = %s AND status = 'proposed'", (incident_id,))
+            "UPDATE op_runs SET status = %s, finished_at = now() WHERE incident_id = %s AND status = %s",
+            (FixStatus.SUPERSEDED, incident_id, FixStatus.PROPOSED))
         conn.execute(
             """
-            UPDATE incidents SET status = 'rerun', attempt = attempt + 1, rerun_model = %s, rerun_by = %s,
+            UPDATE incidents SET status = %s, attempt = attempt + 1, rerun_model = %s, rerun_by = %s,
                 earlier_attempts = earlier_attempts || %s, analysis = NULL, analysis_model = NULL,
                 analysis_worker = NULL, findings = NULL, advice = NULL, error = NULL,
                 notified_at = coalesce(notified_at, now())
             WHERE id = %s
-            """, (model, who, Jsonb([earlier]), incident_id))
+            """, (IncidentStatus.RERUN, model, who, Jsonb([earlier]), incident_id))
     return None
 
 
 def to_notify(conn: Conn) -> list[dict]:
     return conn.execute(
-        "SELECT * FROM incidents WHERE status IN ('analysed', 'triage_failed') AND notified_at IS NULL ORDER BY id"
+        "SELECT * FROM incidents WHERE status = ANY(%s) AND notified_at IS NULL ORDER BY id", (list(ANSWERED),)
     ).fetchall()
 
 
@@ -418,18 +432,18 @@ def mark_notified(conn: Conn, incident_id: int) -> None:
 # -- fixes (fixes.py, executor.py) -------------------------------------------------------------------------------------
 
 def add_op_run(conn: Conn, incident_id: int, operation: str, op_rev: str, params: dict, autonomy: str,
-               status: str, command: str | None = None, error: str | None = None) -> int:
+               status: FixStatus, command: str | None = None, error: str | None = None) -> int:
     return one(conn.execute(
         "INSERT INTO op_runs (incident_id, operation, op_rev, params, autonomy, status, command, error, finished_at)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CASE WHEN %s = 'refused' THEN now() END) RETURNING id",
-        (incident_id, operation, op_rev, Jsonb(params), autonomy, status, command, error, status)))["id"]
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CASE WHEN %s THEN now() END) RETURNING id",
+        (incident_id, operation, op_rev, Jsonb(params), autonomy, status, command, error, status in FINAL)))["id"]
 
 
 def get_op_run(conn: Conn, run_id: int) -> dict | None:
     return conn.execute("SELECT * FROM op_runs WHERE id = %s", (run_id,)).fetchone()
 
 
-def op_runs_with_status(conn: Conn, status: str) -> list[dict]:
+def op_runs_with_status(conn: Conn, status: FixStatus) -> list[dict]:
     return conn.execute("SELECT * FROM op_runs WHERE status = %s ORDER BY id", (status,)).fetchall()
 
 
@@ -437,15 +451,12 @@ def decide_op_run(conn: Conn, run_id: int, approve: bool, who: str) -> bool:
     """Approve or reject a proposed fix. False if it isn't awaiting a decision (already decided, or suggest-only)."""
     row = conn.execute(
         "UPDATE op_runs SET status = %s, decided_by = %s, decided_at = now(),"
-        " finished_at = CASE WHEN %s THEN NULL ELSE now() END WHERE id = %s AND status = 'proposed' RETURNING id",
-        ("approved" if approve else "rejected", who, approve, run_id)).fetchone()
+        " finished_at = CASE WHEN %s THEN NULL ELSE now() END WHERE id = %s AND status = %s RETURNING id",
+        (FixStatus.APPROVED if approve else FixStatus.REJECTED, who, approve, run_id, FixStatus.PROPOSED)).fetchone()
     return row is not None
 
 
-_FINAL = ("refused", "rejected", "failed", "succeeded", "post_failed", "superseded")
-
-
-def update_op_run(conn: Conn, run_id: int, status: str, *, checks: str | None = None,
+def update_op_run(conn: Conn, run_id: int, status: FixStatus, *, checks: str | None = None,
                   result: str | None = None, error: str | None = None, settle_seconds: int | None = None) -> None:
     conn.execute(
         """
@@ -457,27 +468,28 @@ def update_op_run(conn: Conn, run_id: int, status: str, *, checks: str | None = 
         WHERE id = %(id)s
         """,
         {"s": status, "checks": checks, "result": result, "error": error, "settle": settle_seconds,
-         "final": list(_FINAL), "id": run_id})
+         "final": list(FINAL), "id": run_id})
 
 
 def claim_ready(conn: Conn) -> dict | None:
     """The executor takes the oldest ready run (one executor, but safe with more)."""
     return conn.execute(
-        "UPDATE op_runs SET status = 'running', started_at = now() WHERE id = ("
-        " SELECT id FROM op_runs WHERE status = 'ready' ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *"
-    ).fetchone()
+        "UPDATE op_runs SET status = %s, started_at = now() WHERE id = ("
+        " SELECT id FROM op_runs WHERE status = %s ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *",
+        (FixStatus.RUNNING, FixStatus.READY)).fetchone()
 
 
 def op_runs_due_for_post(conn: Conn) -> list[dict]:
-    return conn.execute("SELECT * FROM op_runs WHERE status = 'settling' AND post_due_at <= now() ORDER BY id"
-                        ).fetchall()
+    return conn.execute("SELECT * FROM op_runs WHERE status = %s AND post_due_at <= now() ORDER BY id",
+                        (FixStatus.SETTLING,)).fetchall()
 
 
 def expire_ready(conn: Conn, seconds: int) -> int:
     return len(conn.execute(
-        "UPDATE op_runs SET status = 'failed', finished_at = now(),"
+        "UPDATE op_runs SET status = %s, finished_at = now(),"
         " error = 'the executor did not take it in time: is the executor running?'"
-        " WHERE status = 'ready' AND decided_at < now() - make_interval(secs => %s) RETURNING id", (seconds,)
+        " WHERE status = %s AND decided_at < now() - make_interval(secs => %s) RETURNING id",
+        (FixStatus.FAILED, FixStatus.READY, seconds)
     ).fetchall())
 
 
@@ -485,10 +497,10 @@ def op_runs_since(conn: Conn, operation: str, seconds: int, params: dict | None 
     """Runs of an operation that reached the cluster (or are about to) in the window, for its limits."""
     return one(conn.execute(
         "SELECT count(*) AS n FROM op_runs WHERE operation = %s"
-        " AND status IN ('ready', 'running', 'settling', 'failed', 'succeeded', 'post_failed')"
+        " AND status = ANY(%s)"
         " AND coalesce(started_at, decided_at) > now() - make_interval(secs => %s)"
         " AND (%s::jsonb IS NULL OR params = %s::jsonb)",
-        (operation, seconds, Jsonb(params) if params is not None else None,
+        (operation, list(REACHED_CLUSTER), seconds, Jsonb(params) if params is not None else None,
          Jsonb(params) if params is not None else None)))["n"]
 
 
@@ -496,10 +508,10 @@ def op_runs_to_notify(conn: Conn) -> list[dict]:
     """Outcomes of approved fixes not yet mailed (the proposal itself goes out with the incident's email)."""
     return conn.execute(
         "SELECT * FROM op_runs WHERE decided_by IS NOT NULL AND status = ANY(%s)"
-        " AND notified IS DISTINCT FROM status ORDER BY id", (list(_FINAL),)).fetchall()
+        " AND notified IS DISTINCT FROM status ORDER BY id", (list(FINAL),)).fetchall()
 
 
-def mark_op_run_notified(conn: Conn, run_id: int, status: str) -> None:
+def mark_op_run_notified(conn: Conn, run_id: int, status: FixStatus) -> None:
     conn.execute("UPDATE op_runs SET notified = %s WHERE id = %s", (status, run_id))
 
 
@@ -508,15 +520,16 @@ def operation_records(conn: Conn) -> list[dict]:
     return conn.execute(
         """
         SELECT operation, count(*) AS proposed,
-               count(*) FILTER (WHERE status IN ('succeeded', 'post_failed', 'failed')) AS ran,
-               count(*) FILTER (WHERE status = 'succeeded') AS succeeded,
-               count(*) FILTER (WHERE status = 'post_failed') AS post_failed,
-               count(*) FILTER (WHERE status = 'failed') AS failed,
-               count(*) FILTER (WHERE status = 'rejected') AS rejected,
-               count(*) FILTER (WHERE status = 'refused') AS refused,
-               max(finished_at) FILTER (WHERE status IN ('post_failed', 'failed')) AS last_failure
+               count(*) FILTER (WHERE status = ANY(%(ran)s)) AS ran,
+               count(*) FILTER (WHERE status = %(succeeded)s) AS succeeded,
+               count(*) FILTER (WHERE status = %(post_failed)s) AS post_failed,
+               count(*) FILTER (WHERE status = %(failed)s) AS failed,
+               count(*) FILTER (WHERE status = %(rejected)s) AS rejected,
+               count(*) FILTER (WHERE status = %(refused)s) AS refused,
+               max(finished_at) FILTER (WHERE status = ANY(%(failures)s)) AS last_failure
         FROM op_runs GROUP BY operation
-        """).fetchall()
+        """, {"ran": list(RAN), "failures": [FixStatus.POST_FAILED, FixStatus.FAILED],
+              **{s: FixStatus(s) for s in ("succeeded", "post_failed", "failed", "rejected", "refused")}}).fetchall()
 
 
 # -- health (/metrics) -----------------------------------------------------------------------------------------------
@@ -531,12 +544,12 @@ def health(conn: Conn) -> dict:
     out |= one(conn.execute(
         """
         SELECT coalesce(extract(epoch FROM now() - min(first_seen) FILTER (
-                   WHERE status IN ('new', 'triaging', 'investigating', 'advising') AND attempt = 1)), 0)
+                   WHERE status = ANY(%(waiting)s) AND attempt = 1)), 0)
                    AS oldest_waiting,                  -- a re-run of an old incident isn't an alert waiting for triage
                coalesce(extract(epoch FROM now() - min(first_seen) FILTER (
-                   WHERE status IN ('analysed', 'triage_failed') AND notified_at IS NULL)), 0) AS oldest_unmailed
+                   WHERE status = ANY(%(answered)s) AND notified_at IS NULL)), 0) AS oldest_unmailed
         FROM incidents
-        """))
+        """, {"waiting": list(WAITING), "answered": list(ANSWERED)}))
     return out
 
 
@@ -574,10 +587,10 @@ def list_incidents(conn: Conn, limit: int = 200) -> list[dict]:
             SELECT count(*) AS n, count(*) FILTER (WHERE alert_resolved_at IS NULL) AS open, max(first_seen) AS last
             FROM incidents WHERE repeat_of = i.id
         ) r ON true
-        WHERE i.status <> 'repeat'                     -- shown folded under the incident they repeat
+        WHERE i.status <> %s                           -- shown folded under the incident they repeat
         ORDER BY greatest(i.first_seen, r.last) DESC LIMIT %s
         """,
-        (limit,),
+        (IncidentStatus.REPEAT, limit),
     ).fetchall()
 
 

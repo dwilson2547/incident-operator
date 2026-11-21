@@ -12,6 +12,7 @@ from incident_operator import db
 from incident_operator.app import create_ui_app, create_webhook_app
 from incident_operator.notify import Notifier, compose
 from incident_operator.ops import Runner
+from incident_operator.states import IncidentStatus
 from incident_operator.triage import PROMPT_VERSION, Engine, GpuScheduler, build_messages
 
 pytestmark = needs_pg
@@ -125,8 +126,8 @@ def test_build_messages_shows_labels_and_annotations():
 
 def test_email_composition(conn):
     inc_id, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
-    db.set_status(conn, inc_id, "analysed", analysis="Where it failed: the scraper.", analysis_model="qwen35-9b",
-                  analysis_worker="ainode")
+    db.set_status(conn, inc_id, IncidentStatus.ANALYSED, analysis="Where it failed: the scraper.",
+                  analysis_model="qwen35-9b", analysis_worker="ainode")
     msg = compose(db.incident(conn, inc_id), smtp_config(sender="a@b", to=["c@d"], public_url="http://io.local"))
     assert msg["Subject"] == "[triage] KubePodCrashLooping · namespace=gyopart pod=x"
     body = msg.get_content()
@@ -150,7 +151,7 @@ def test_email_goes_through_smtp(conn):
     ctl.start()
     try:
         inc_id, _ = db.record_firing(conn, alert())
-        db.set_status(conn, inc_id, "analysed", analysis="ok")
+        db.set_status(conn, inc_id, IncidentStatus.ANALYSED, analysis="ok")
         Notifier(smtp_config(host="127.0.0.1", port=port, starttls=False,
                              sender="io@x", to=["me@x"])).send_incident(db.incident(conn, inc_id))
     finally:
@@ -281,7 +282,7 @@ def test_metrics_for_the_operators_own_alerts(conn):
     db.record_firing(conn, alert("a"))
     conn.execute("UPDATE incidents SET first_seen = now() - interval '2 hours'")
     i, _ = db.record_firing(conn, alert("b"))
-    db.set_status(conn, i, "analysed")
+    db.set_status(conn, i, IncidentStatus.ANALYSED)
     engine = SimpleNamespace(last_pass=None)
     with TestClient(create_webhook_app(conn.info.dsn, engine)) as c:
         text = c.get("/metrics").text

@@ -46,8 +46,10 @@ any of these: the test suite (with a test Postgres, see README: Develop) must pa
 
 ## 5. Strings for state
 
-- [ ] Incident and fix statuses, turn sessions and evidence triggers become `StrEnum`s; the status lists repeated in
-      `db.py` queries become named constants.
+- [x] Incident and fix statuses, turn sessions and evidence triggers become `StrEnum`s; the status lists repeated in
+      `db.py` queries become named constants. All in `states.py`; queries take them as parameters, `db` signatures
+      take the enum (so pyright rejects a bare string), and `tests/test_states.py` holds the schema's CHECK lists to
+      the enums. gpu-scheduler's job statuses stay strings: they are its API, not ours.
 - [ ] Incident, turn and fix rows get `TypedDict`s, so a key typo is a type error.
 
 ## 6. The triage engine

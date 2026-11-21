@@ -13,6 +13,7 @@ from incident_operator import db, executor, fixes
 from incident_operator.app import create_ui_app
 from incident_operator.library import Library
 from incident_operator.ops import Prometheus, Result, Runner
+from incident_operator.states import FixStatus
 from incident_operator.triage import Engine
 
 NODE = {"metadata": {"name": "k8s-worker1"},
@@ -267,12 +268,12 @@ def test_limits_and_changed_operation_refuse(conn, tmp_path):
     e.step()
     assert op_run(conn, first["id"])["status"] == "ready"
     second = db.add_op_run(conn, first["incident_id"], first["operation"], first["op_rev"], first["params"],
-                           "approve", "proposed")
+                           "approve", FixStatus.PROPOSED)
     approve(conn, second)
     e.step()
     assert op_run(conn, second)["error"].startswith("limit: restart-csi-nfs-node already ran 1 time")
     third = db.add_op_run(conn, first["incident_id"], first["operation"], "0ldrev", {"node": "k8s-worker2"},
-                          "approve", "proposed")
+                          "approve", FixStatus.PROPOSED)
     approve(conn, third)
     e.step()
     assert "changed since it was proposed" in op_run(conn, third)["error"]
@@ -285,11 +286,11 @@ def test_executor_refuses_what_the_operation_does_not_allow(conn, tmp_path):
     op = lib.operations["restart-csi-nfs-node"]
     inc_id, _ = db.record_firing(conn, wedge_alert())
     for params in ({"node": "k8s-worker1 --all"}, {"node": "k8s-worker1", "namespace": "default"}):
-        rid = db.add_op_run(conn, inc_id, op.name, op.rev, params, "approve", "ready")
+        rid = db.add_op_run(conn, inc_id, op.name, op.rev, params, "approve", FixStatus.READY)
         executor.step(conn, lib, cluster())
         assert op_run(conn, rid)["status"] == "failed"
     k8s = cluster(pods=2)                                             # selector matches more than maxPods
-    rid = db.add_op_run(conn, inc_id, op.name, op.rev, {"node": "k8s-worker1"}, "approve", "ready")
+    rid = db.add_op_run(conn, inc_id, op.name, op.rev, {"node": "k8s-worker1"}, "approve", FixStatus.READY)
     executor.step(conn, lib, k8s)
     r = op_run(conn, rid)
     assert r["status"] == "failed" and "more than maxPods=1" in r["error"] and not k8s.deleted
@@ -298,14 +299,14 @@ def test_executor_refuses_what_the_operation_does_not_allow(conn, tmp_path):
 @needs_pg
 def test_decisions_need_sign_in_and_json(conn):
     inc_id, _ = db.record_firing(conn, wedge_alert())
-    rid = db.add_op_run(conn, inc_id, "restart-csi-nfs-node", "r", {"node": "n"}, "approve", "proposed")
+    rid = db.add_op_run(conn, inc_id, "restart-csi-nfs-node", "r", {"node": "n"}, "approve", FixStatus.PROPOSED)
     assert approve(conn, rid, ui_settings()).status_code == 403              # open LAN page: no approvals
     with TestClient(create_ui_app(conn.info.dsn, ui_settings(allow_anonymous_decisions=True))) as c:
         assert c.post(f"/api/fixes/{rid}/approve", content="x",
                       headers={"content-type": "application/x-www-form-urlencoded"}).status_code == 415
         assert c.get("/api/me").json() == {"user": None, "can_decide": True}
         assert c.post(f"/api/fixes/{rid}/reject", json={}).json()["status"] == "rejected"
-    sid = db.add_op_run(conn, inc_id, "restart-csi-nfs-node", "r", {"node": "n"}, "suggest", "suggested")
+    sid = db.add_op_run(conn, inc_id, "restart-csi-nfs-node", "r", {"node": "n"}, "suggest", FixStatus.SUGGESTED)
     assert approve(conn, sid).status_code == 409                      # suggest-only never runs from here
 
 
@@ -411,10 +412,11 @@ def test_executor_annotates_only_where_allowed(conn):
     inc_id, _ = db.record_firing(conn, alert("s1", alertname="ScrapeJobFailing"))
     k8s = cluster()
     rid = db.add_op_run(conn, inc_id, op.name, op.rev, {"namespace": "gyopart-dev", "name": "site-a"},
-                        "approve", "ready")
+                        "approve", FixStatus.READY)
     executor.step(conn, lib, k8s)
     assert op_run(conn, rid)["status"] == "failed" and not k8s.patched
-    rid = db.add_op_run(conn, inc_id, op.name, op.rev, {"namespace": "gyopart", "name": "site-a"}, "approve", "ready")
+    rid = db.add_op_run(conn, inc_id, op.name, op.rev, {"namespace": "gyopart", "name": "site-a"}, "approve",
+                        FixStatus.READY)
     executor.step(conn, lib, k8s)
     assert op_run(conn, rid)["status"] == "settling"
     want = {"metadata": {"annotations": {"scrape.danwils.com/run-now": f"incident-operator-{rid}"}}}
