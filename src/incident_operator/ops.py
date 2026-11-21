@@ -11,12 +11,15 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import evidence
 from .library import Operation, seconds
 from .settings import Env
 from .text import cap, error_text
+
+if TYPE_CHECKING:
+    from .models import Evidence
 
 log = logging.getLogger("incident_operator.ops")
 
@@ -35,9 +38,9 @@ class Result:
     error: str | None = None
 
     @classmethod
-    def from_evidence(cls, e: dict) -> Result:
+    def from_evidence(cls, e: Evidence) -> Result:
         """A result stored as an evidence row, read back (generic evidence has a kind but no operation)."""
-        return cls(e["operation"] or e["kind"], e["source"], e["content"], e["data"], e["truncated"], e["error"])
+        return cls(e.operation or e.kind, e.source, e.content, e.data, e.truncated, e.error)
 
 
 class Prometheus:

@@ -84,24 +84,24 @@ def perform(k8s: K8s, op: Operation, params: dict, run_id: int) -> str:
     raise RuntimeError(f"unknown verb {run['verb']}")
 
 
-def step(conn, library: Library, k8s: K8s) -> int:
+def step(store: db.Store, library: Library, k8s: K8s) -> int:
     library.refresh()
-    run = db.claim_ready(conn)
+    run = store.claim_ready()
     if run is None:
         return 0
-    op = library.operations.get(run["operation"])
+    op = library.operations.get(run.operation)
     try:
         if op is None or not op.mutating:
-            raise RuntimeError(f"{run['operation']} isn't a loaded mutating operation")
-        if op.rev != run["op_rev"]:
-            raise RuntimeError(f"{op.name} changed since it was approved ({run['op_rev']} -> {op.rev})")
-        result = perform(k8s, op, run["params"], run["id"])
+            raise RuntimeError(f"{run.operation} isn't a loaded mutating operation")
+        if op.rev != run.op_rev:
+            raise RuntimeError(f"{op.name} changed since it was approved ({run.op_rev} -> {op.rev})")
+        result = perform(k8s, op, run.params, run.id)
     except Exception as e:
-        log.warning("fix run %s (%s) failed: %s", run["id"], run["operation"], e)
-        db.update_op_run(conn, run["id"], FixStatus.FAILED, error=error_text(e, 500))
+        log.warning("fix run %s (%s) failed: %s", run.id, run.operation, e)
+        store.update_op_run(run.id, FixStatus.FAILED, error=error_text(e, 500))
         return 1
-    db.update_op_run(conn, run["id"], FixStatus.SETTLING, result=result, settle_seconds=op.settle_seconds)
-    log.info("fix run %s (%s): %s; post-checks in %ss", run["id"], op.name, result, op.settle_seconds)
+    store.update_op_run(run.id, FixStatus.SETTLING, result=result, settle_seconds=op.settle_seconds)
+    log.info("fix run %s (%s): %s; post-checks in %ss", run.id, op.name, result, op.settle_seconds)
     return 1
 
 
@@ -111,13 +111,13 @@ def main() -> int:
     env.check()
     logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    conn = db.connect(url)
+    store = db.Store(url, pool_size=1)
     library = Library(None, operations_dir)
     k8s = K8s.from_env()
     log.info("executor: watching for ready fix runs")
     while True:
         try:
-            if step(conn, library, k8s) == 0:
+            if step(store, library, k8s) == 0:
                 time.sleep(3)
         except Exception:
             log.exception("executor pass failed")

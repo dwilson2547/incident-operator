@@ -59,10 +59,15 @@ def _one_of(column: str, values: Iterable[StrEnum]) -> str:
 
 NOW = text("now()")
 TS = DateTime(timezone=True)
+JSON = JSONB(none_as_null=True)     # None is SQL NULL, as it always was; JSONB's default would store JSON `null`
 
 
 class Base(DeclarativeBase):
-    type_annotation_map = {dict[str, Any]: JSONB, list[Any]: JSONB, datetime: TS, str: Text}
+    type_annotation_map = {dict[str, Any]: JSON, list[Any]: JSON, datetime: TS, str: Text}
+
+    def to_dict(self) -> dict[str, Any]:
+        """Every column, in table order: what `SELECT *` gave the API before the models."""
+        return {c.key: getattr(self, c.key) for c in self.__mapper__.column_attrs}
 
 
 class Incident(Base):
@@ -131,7 +136,7 @@ class Evidence(Base):
     trigger: Mapped[Trigger] = mapped_column(EnumText(Trigger), server_default=Trigger.GENERIC.value)
     operation: Mapped[str | None]
     round: Mapped[int | None]
-    data: Mapped[Any | None] = mapped_column(JSONB)    # the result's structured form, when it is JSON
+    data: Mapped[Any | None] = mapped_column(JSON)    # the result's structured form, when it is JSON
 
     __table_args__ = (Index("evidence_incident", "incident_id"),)
 

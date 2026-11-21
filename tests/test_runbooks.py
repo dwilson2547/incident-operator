@@ -213,32 +213,32 @@ def crash_k8s():
                     "/api/v1/namespaces/n/pods/web-7d9f8-abcde/log?previous=true": "allocating cache"})
 
 
-def engine(conn, gpu, tmp_path, k8s=None):
+def engine(store, gpu, tmp_path, k8s=None):
     primer = tmp_path / "primer.md"
     primer.write_text("Exit 137 = OOMKilled.")
     k8s = k8s or crash_k8s()
-    return Engine(conn, triage_config(primer_path=str(primer)), k8s, gpu, None, Runner(k8s, FakeProm()),
+    return Engine(store, triage_config(primer_path=str(primer)), k8s, gpu, None, Runner(k8s, FakeProm()),
                   library=load(CHART))
 
 
 @needs_pg
-def test_investigation_requests_a_check_then_finishes_and_gets_advice(conn, tmp_path):
+def test_investigation_requests_a_check_then_finishes_and_gets_advice(store, tmp_path):
     gpu = ScriptedGpu([
         {"action": "request", "requests": ["pod-memory-6h", "pod-memory-6h"], "reason": "is it a leak?",
          "findings": FINDINGS},
         {"action": "done", "requests": [], "reason": "enough", "findings": FINDINGS},
         ADVICE])
-    e = engine(conn, gpu, tmp_path)
-    inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    e = engine(store, gpu, tmp_path)
+    inc_id, _ = store.record_firing(alert(namespace="n", pod="web-7d9f8-abcde"))
     e.step()                                     # precursors + turn 1, answered + turn 2, answered + remediation, ...
     for _ in range(4):
         e.step()
-    inc = db.incident(conn, inc_id)
-    assert inc["status"] == "analysed" and inc["runbook"] == "pod-crashloop" and inc["runbook_rev"]
-    assert inc["target"] == {"kind": "Pod", "name": "web-7d9f8-abcde", "namespace": "n"}
-    assert [(e_["trigger"], e_["operation"]) for e_ in inc["evidence"]] == [
+    inc = store.incident(inc_id)
+    assert inc.status == "analysed" and inc.runbook == "pod-crashloop" and inc.runbook_rev
+    assert inc.target == {"kind": "Pod", "name": "web-7d9f8-abcde", "namespace": "n"}
+    assert [(e_.trigger, e_.operation) for e_ in inc.evidence] == [
         ("precursor", "pod-status"), ("precursor", "pod-previous-logs"), ("requested", "pod-memory-6h")]
-    assert [(t["session"], t["turn"]) for t in inc["turns"]] == [("investigation", 1), ("investigation", 2),
+    assert [(t.session, t.turn) for t in inc.turns] == [("investigation", 1), ("investigation", 2),
                                                                  ("remediation", 3)]
     first_user = gpu.submitted[0][0][1]["content"]
     assert "OOMKilled" in first_user and "pod-memory-6h:" in first_user
@@ -246,67 +246,67 @@ def test_investigation_requests_a_check_then_finishes_and_gets_advice(conn, tmp_
     assert gpu.submitted[0][1]["properties"]["action"]["enum"] == ["request", "done"]
     remediation = gpu.submitted[2][0]
     assert "allocating cache" not in json.dumps(remediation)            # no raw evidence reaches remediation
-    assert "Raise the memory limit" in inc["analysis"] and "Confidence: high" in inc["analysis"]
-    assert inc["findings"] == FINDINGS and inc["advice"] == ADVICE
+    assert "Raise the memory limit" in inc.analysis and "Confidence: high" in inc.analysis
+    assert inc.findings == FINDINGS and inc.advice == ADVICE
     # no runbook-matched incident shows up as needing one
-    assert all(r["alertname"] != "KubePodCrashLooping" for r in db.needs_runbook(conn))
+    assert all(r["alertname"] != "KubePodCrashLooping" for r in store.needs_runbook())
 
 
 @needs_pg
-def test_last_round_must_finish(conn, tmp_path):
+def test_last_round_must_finish(store, tmp_path):
     ask = {"action": "request", "requests": ["pod-restarts-6h"], "reason": "more", "findings": FINDINGS}
     gpu = ScriptedGpu([ask, ask, {**ask, "action": "done", "requests": []}, ADVICE])
-    e = engine(conn, gpu, tmp_path)
-    inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    e = engine(store, gpu, tmp_path)
+    inc_id, _ = store.record_firing(alert(namespace="n", pod="web-7d9f8-abcde"))
     for _ in range(6):
         e.step()
-    assert db.incident(conn, inc_id)["status"] == "analysed"
+    assert store.incident(inc_id).status == "analysed"
     assert gpu.submitted[2][1]["properties"]["action"]["enum"] == ["done"]          # turn 3 of 3
     assert "last turn" in gpu.submitted[2][0][-1]["content"]
 
 
 @needs_pg
-def test_gpu_outage_mid_loop_resumes(conn, tmp_path):
+def test_gpu_outage_mid_loop_resumes(store, tmp_path):
     gpu = ScriptedGpu([{"action": "done", "requests": [], "reason": "r", "findings": FINDINGS}, ADVICE])
-    e = engine(conn, gpu, tmp_path)
-    inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    e = engine(store, gpu, tmp_path)
+    inc_id, _ = store.record_firing(alert(namespace="n", pod="web-7d9f8-abcde"))
     assert e.library
     e.library.refresh()
     e.start_new()                                # turn 1 submitted (and, scripted, already answered)
     gpu.down = True                              # ...but the remediation turn can't be submitted
     e.poll()
     e.poll()
-    inc = db.incident(conn, inc_id)
-    assert inc["status"] == "investigating" and inc["turns"][0]["status"] == "submitted"   # waits, nothing lost
+    inc = store.incident(inc_id)
+    assert inc.status == "investigating" and inc.turns[0].status == "submitted"   # waits, nothing lost
     gpu.down = False
     e.step()
     e.step()
-    assert db.incident(conn, inc_id)["status"] == "analysed"
+    assert store.incident(inc_id).status == "analysed"
 
 
 @needs_pg
-def test_checks_listed_with_done_still_run_while_rounds_remain(conn, tmp_path):
+def test_checks_listed_with_done_still_run_while_rounds_remain(store, tmp_path):
     gpu = ScriptedGpu([{"action": "done", "requests": ["pod-restarts-6h"], "reason": "r", "findings": FINDINGS},
                        {"action": "done", "requests": [], "reason": "r", "findings": FINDINGS}, ADVICE])
-    e = engine(conn, gpu, tmp_path)
-    inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    e = engine(store, gpu, tmp_path)
+    inc_id, _ = store.record_firing(alert(namespace="n", pod="web-7d9f8-abcde"))
     for _ in range(4):
         e.step()
-    inc = db.incident(conn, inc_id)
-    assert inc["status"] == "analysed"
-    assert [t["session"] for t in inc["turns"]] == ["investigation"] * 2 + ["remediation"]
-    assert any(x["operation"] == "pod-restarts-6h" for x in inc["evidence"])
+    inc = store.incident(inc_id)
+    assert inc.status == "analysed"
+    assert [t.session for t in inc.turns] == ["investigation"] * 2 + ["remediation"]
+    assert any(x.operation == "pod-restarts-6h" for x in inc.evidence)
 
 
 @needs_pg
-def test_reply_that_isnt_json_fails_the_incident(conn, tmp_path):
+def test_reply_that_isnt_json_fails_the_incident(store, tmp_path):
     gpu = ScriptedGpu([None])
-    e = engine(conn, gpu, tmp_path)
-    inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    e = engine(store, gpu, tmp_path)
+    inc_id, _ = store.record_firing(alert(namespace="n", pod="web-7d9f8-abcde"))
     e.step()
     e.step()
-    inc = db.incident(conn, inc_id)
-    assert inc["status"] == "triage_failed" and "wasn't the JSON" in inc["error"]
+    inc = store.incident(inc_id)
+    assert inc.status == "triage_failed" and "wasn't the JSON" in inc.error
 
 
 DONE = {"action": "done", "requests": [], "reason": "enough", "findings": FINDINGS}
@@ -318,15 +318,15 @@ def test_evidence_refs_are_bounded():
 
 
 @needs_pg
-def test_cut_off_investigation_reply_is_retried_with_a_changed_prompt(conn, tmp_path):
+def test_cut_off_investigation_reply_is_retried_with_a_changed_prompt(store, tmp_path):
     gpu = ScriptedGpu([CUT_OFF, DONE, ADVICE])
-    e = engine(conn, gpu, tmp_path)
-    inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    e = engine(store, gpu, tmp_path)
+    inc_id, _ = store.record_firing(alert(namespace="n", pod="web-7d9f8-abcde"))
     for _ in range(4):
         e.step()
-    inc = db.incident(conn, inc_id)
-    assert inc["status"] == "analysed"
-    assert [(t["session"], t["turn"]) for t in inc["turns"]] == [("investigation", 1), ("investigation", 1),
+    inc = store.incident(inc_id)
+    assert inc.status == "analysed"
+    assert [(t.session, t.turn) for t in inc.turns] == [("investigation", 1), ("investigation", 1),
                                                                  ("remediation", 2)]
     (first, schema1), (second, schema2) = gpu.submitted[:2]
     assert first != second and "token limit" in second[-1]["content"] and "token limit" not in first[-1]["content"]
@@ -334,52 +334,52 @@ def test_cut_off_investigation_reply_is_retried_with_a_changed_prompt(conn, tmp_
 
 
 @needs_pg
-def test_cut_off_remediation_reply_is_retried(conn, tmp_path):
+def test_cut_off_remediation_reply_is_retried(store, tmp_path):
     gpu = ScriptedGpu([DONE, CUT_OFF, ADVICE])
-    e = engine(conn, gpu, tmp_path)
-    inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    e = engine(store, gpu, tmp_path)
+    inc_id, _ = store.record_firing(alert(namespace="n", pod="web-7d9f8-abcde"))
     for _ in range(4):
         e.step()
-    inc = db.incident(conn, inc_id)
-    assert inc["status"] == "analysed" and [t["session"] for t in inc["turns"]] == ["investigation", "remediation",
+    inc = store.incident(inc_id)
+    assert inc.status == "analysed" and [t.session for t in inc.turns] == ["investigation", "remediation",
                                                                                     "remediation"]
 
 
 @needs_pg
-def test_second_cut_off_reply_fails_and_says_why(conn, tmp_path):
+def test_second_cut_off_reply_fails_and_says_why(store, tmp_path):
     gpu = ScriptedGpu([CUT_OFF, CUT_OFF])
-    e = engine(conn, gpu, tmp_path)
-    inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    e = engine(store, gpu, tmp_path)
+    inc_id, _ = store.record_firing(alert(namespace="n", pod="web-7d9f8-abcde"))
     for _ in range(4):
         e.step()
-    inc = db.incident(conn, inc_id)
-    assert inc["status"] == "triage_failed" and "1536-token limit" in inc["error"] and len(gpu.submitted) == 2
+    inc = store.incident(inc_id)
+    assert inc.status == "triage_failed" and "1536-token limit" in inc.error and len(gpu.submitted) == 2
 
 
 @needs_pg
-def test_retry_waits_for_an_unreachable_gpu_scheduler(conn, tmp_path):
+def test_retry_waits_for_an_unreachable_gpu_scheduler(store, tmp_path):
     gpu = ScriptedGpu([CUT_OFF, DONE, ADVICE])
-    e = engine(conn, gpu, tmp_path)
-    inc_id, _ = db.record_firing(conn, alert(namespace="n", pod="web-7d9f8-abcde"))
+    e = engine(store, gpu, tmp_path)
+    inc_id, _ = store.record_firing(alert(namespace="n", pod="web-7d9f8-abcde"))
     e.start_new()
     gpu.down = True
     assert e.poll() == 0
-    inc = db.incident(conn, inc_id)
-    assert inc["status"] == "investigating" and [t["status"] for t in inc["turns"]] == ["submitted"]
+    inc = store.incident(inc_id)
+    assert inc.status == "investigating" and [t.status for t in inc.turns] == ["submitted"]
     gpu.down = False
     for _ in range(3):
         e.step()
-    assert db.incident(conn, inc_id)["status"] == "analysed"
+    assert store.incident(inc_id).status == "analysed"
 
 
 @needs_pg
-def test_alert_without_runbook_still_gets_phase_1_triage(conn, tmp_path):
+def test_alert_without_runbook_still_gets_phase_1_triage(store, tmp_path):
     from test_triage import FakeGpu
     gpu = FakeGpu()
-    e = engine(conn, gpu, tmp_path)
-    inc_id, _ = db.record_firing(conn, alert(alertname="NodeClockNotSynchronising"))
+    e = engine(store, gpu, tmp_path)
+    inc_id, _ = store.record_firing(alert(alertname="NodeClockNotSynchronising"))
     e.step()
-    assert db.incident(conn, inc_id)["status"] == "triaging" and db.incident(conn, inc_id)["runbook"] is None
+    assert store.incident(inc_id).status == "triaging" and store.incident(inc_id).runbook is None
 
 
 def test_render_analysis_skips_empty_escalation():
@@ -396,22 +396,22 @@ def test_results_respect_the_budget():
 
 
 @needs_pg
-def test_last_good_version_survives_a_restart(conn, lib_dirs):
+def test_last_good_version_survives_a_restart(store, lib_dirs):
     """2026-11-01: a new chart reached a pod running an older image, which rejected the NFS runbook; the in-memory
     last good version was gone because the pod had restarted."""
-    good = load_with(lib_dirs, conn)
+    good = load_with(lib_dirs, store)
     rev = good.runbooks["pod-crashloop"].rev
     rb = lib_dirs / "runbooks" / "pod-crashloop.md"
     rb.write_text(rb.read_text().replace("operations: [", "operations: [no-such-op, "))
-    after_restart = load_with(lib_dirs, conn)                     # a new process: nothing in memory
+    after_restart = load_with(lib_dirs, store)                     # a new process: nothing in memory
     assert after_restart.runbooks["pod-crashloop"].rev == rev
     assert "serving the last good version, saved" in after_restart.errors["runbooks/pod-crashloop.md"]
     (lib_dirs / "runbooks" / "nfs-client-wedge.md").unlink()       # removed from the chart: not brought back
-    assert "nfs-client-wedge" not in load_with(lib_dirs, conn).runbooks
+    assert "nfs-client-wedge" not in load_with(lib_dirs, store).runbooks
     assert load(lib_dirs).runbooks.get("pod-crashloop") is None    # without a store, nothing to fall back on
 
 
-def load_with(d, conn):
-    lib = Library(str(d / "runbooks"), str(d / "operations"), store=db.LastGood(conn))
+def load_with(d, store):
+    lib = Library(str(d / "runbooks"), str(d / "operations"), store=db.LastGood(store))
     lib.refresh()
     return lib

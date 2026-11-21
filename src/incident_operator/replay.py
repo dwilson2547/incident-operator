@@ -25,6 +25,7 @@ from pathlib import Path
 from . import db, investigate
 from .k8s import K8s
 from .library import Library
+from .models import Incident
 from .ops import Prometheus, Result, Runner
 from .settings import Env
 from .states import Session
@@ -52,25 +53,25 @@ def _ask(gpu, messages, schema, cfg, timeout) -> tuple[dict | None, str, dict]:
     return res.get("json"), res.get("text", ""), job
 
 
-def replay_runbook(inc: dict, lib: Library, gpu: GpuScheduler, cfg: Config, timeout: float,
+def replay_runbook(inc: Incident, lib: Library, gpu: GpuScheduler, cfg: Config, timeout: float,
                    runner: Runner | None = None, related: str = "") -> dict:
-    rb = lib.match(inc["labels"])
+    rb = lib.match(inc.labels)
     if rb is None:
         return {"error": "no runbook in the working tree matches this alert"}
-    stored = {e["operation"]: Result.from_evidence(e) for e in inc["evidence"] if e["operation"]}
+    stored = {e.operation: Result.from_evidence(e) for e in inc.evidence if e.operation}
     if runner is not None:                    # --live: what the checks say now, earlier results feeding later params
         ran: dict[str, Result] = {}
 
         def check(n):
             if n not in ran:
-                ran[n] = runner.run(lib.operations[n], inc["target"], inc["labels"], ran)
+                ran[n] = runner.run(lib.operations[n], inc.target, inc.labels, ran)
             return ran[n]
     else:
         def check(n):
             return stored.get(n) or Result(n, n, None, error="not stored for this incident (replay doesn't run checks)")
     pre = [check(n) for n in rb.precursors]
     menu, menu_txt = investigate.menu_text(rb, lib.operations)
-    messages = investigate.first_messages(inc, rb, inc["target"], pre, menu_txt, cfg.primer(), related)
+    messages = investigate.first_messages(inc, rb, inc.target, pre, menu_txt, cfg.primer(), related)
     turns, findings, model = [], {}, None
     for n in range(1, investigate.MAX_ROUNDS + 1):
         schema = investigate.investigation_schema(menu, final=n >= investigate.MAX_ROUNDS)
@@ -87,17 +88,17 @@ def replay_runbook(inc: dict, lib: Library, gpu: GpuScheduler, cfg: Config, time
         messages = investigate.next_messages(messages, text, results, [a for a in asked if a not in menu],
                                              investigate.MAX_ROUNDS - 1 - n)
     fixes, fixes_txt = investigate.fixes_text(rb, lib.operations)
-    advice, _, _ = _ask(gpu, investigate.remediation_messages(inc, rb, inc["target"], findings, cfg.primer(), fixes_txt,
+    advice, _, _ = _ask(gpu, investigate.remediation_messages(inc, rb, inc.target, findings, cfg.primer(), fixes_txt,
                                                             related),
                         investigate.advice_schema(fixes), cfg, timeout)
     return {"runbook": f"{rb.name}@{rb.rev}", "model": model, "turns": turns, "findings": findings, "advice": advice}
 
 
-def replay_triage(inc: dict, gpu: GpuScheduler, cfg: Config, timeout: float) -> dict:
-    first = next((t for t in inc["turns"] if t["session"] == Session.TRIAGE), None)
+def replay_triage(inc: Incident, gpu: GpuScheduler, cfg: Config, timeout: float) -> dict:
+    first = next((t for t in inc.turns if t.session == Session.TRIAGE), None)
     if first is None:
         return {"error": "no stored triage turn"}
-    job = _wait(gpu, gpu.submit(first["messages"]), timeout)
+    job = _wait(gpu, gpu.submit(first.messages), timeout)
     return {"model": f"{job.get('ran_model')} on {job.get('worker')}",
             "analysis": (job.get("result") or {}).get("text") or job.get("error")}
 
@@ -124,24 +125,24 @@ def main(argv: list[str]) -> int:
     lib.refresh()
     for path, err in lib.errors.items():
         print(f"! {path}: {err}")
-    conn = db.connect(url)
+    store = db.Store(url, pool_size=1)
     # Live checks get no probe namespace or image, so probes answer with an error rather than start Jobs.
     runner = Runner(K8s(base=live[0]), Prometheus(live[1])) if live else None
     for i in a.ids:
-        inc = db.get_incident(conn, i)
+        inc = store.get_incident(i)
         if inc is None:
             print(f"#{i}: no such incident")
             continue
-        then = {"runbook": inc["runbook"], "model": f"{inc['analysis_model']} on {inc['analysis_worker']}",
-                "findings": inc["findings"], "advice": inc["advice"],
-                "analysis": None if inc["runbook"] else inc["analysis"]}
+        then = {"runbook": inc.runbook, "model": f"{inc.analysis_model} on {inc.analysis_worker}",
+                "findings": inc.findings, "advice": inc.advice,
+                "analysis": None if inc.runbook else inc.analysis}
         try:
-            related = investigate.related_block(db.related(conn, inc))
-            now = (replay_runbook(inc, lib, gpu, cfg, a.timeout, runner, related) if lib.match(inc["labels"])
+            related = investigate.related_block(store.related(inc))
+            now = (replay_runbook(inc, lib, gpu, cfg, a.timeout, runner, related) if lib.match(inc.labels)
                    else replay_triage(inc, gpu, cfg, a.timeout))
         except Exception as e:
             now = {"error": error_text(e)}
-        print(f"\n=== #{i} {inc['alertname']} {inc['labels'].get('namespace', '')}")
+        print(f"\n=== #{i} {inc.alertname} {inc.labels.get('namespace', '')}")
         print("--- then:\n" + json.dumps({k: v for k, v in then.items() if v}, indent=1, ensure_ascii=False))
         print("--- now:\n" + json.dumps(now, indent=1, ensure_ascii=False))
     return 0

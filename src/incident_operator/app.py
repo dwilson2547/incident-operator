@@ -15,35 +15,26 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from html import escape
 from importlib.resources import files
+from typing import Any
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
-from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
 from . import __version__, db, investigate, oidc
 from .library import Library
+from .models import Incident
 from .settings import Env
 
 log = logging.getLogger("incident_operator.app")
 
 
-def _pool_app(database_url: str, title: str) -> FastAPI:
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        # check: test each connection on checkout and replace it if postgres has dropped it (a restart, a terminated
-        # session). Without it every pooled connection answers one request with a 500 before the pool discards it.
-        app.state.pool = ConnectionPool(database_url, kwargs={"row_factory": dict_row, "autocommit": True},
-                                        open=True, max_size=4, check=ConnectionPool.check_connection)
-        yield
-        app.state.pool.close()
-    app = FastAPI(title=title, version=__version__, lifespan=lifespan)
+def _base_app(title: str) -> FastAPI:
+    app = FastAPI(title=title, version=__version__)
 
     @app.get("/healthz")
     def healthz():
@@ -51,18 +42,24 @@ def _pool_app(database_url: str, title: str) -> FastAPI:
     return app
 
 
-def _conn(request: Request):
-    with request.app.state.pool.connection() as c:
-        yield c
+def incident_json(inc: Incident, store: db.Store, rerun_models: list[dict]) -> dict[str, Any]:
+    """The detail page's JSON: the incident's columns, what was collected and asked, its fixes, the incidents that
+    repeat it, and what else was going on (each nearby alert with the subject the page shows)."""
+    related: dict[str, Any] = dict(store.related(inc))
+    related["nearby"] = [{**r, "subject": investigate.alert_subject(r["labels"])} for r in related["nearby"]]
+    return inc.to_dict() | {
+        "evidence": [e.to_dict() for e in inc.evidence], "turns": [t.to_dict() for t in inc.turns],
+        "fixes": [f.to_dict() for f in inc.fixes], "repeats": store.repeats(inc.id), "related": related,
+        "rerun_models": rerun_models}
 
 
-def create_webhook_app(database_url: str, engine=None) -> FastAPI:
-    app = _pool_app(database_url, "incident-operator webhook")
+def create_webhook_app(store: db.Store, engine=None) -> FastAPI:
+    app = _base_app("incident-operator webhook")
 
     @app.get("/metrics", response_class=PlainTextResponse)
-    def metrics(c=Depends(_conn)):
+    def metrics():
         """Prometheus text format, read from the database on each scrape (one scrape a minute)."""
-        h = db.health(c)
+        h = store.health()
         lines = ["# TYPE incident_operator_incidents gauge"]
         lines += [f'incident_operator_incidents{{status="{k}"}} {v}' for k, v in sorted(h["incidents"].items())]
         lines += ["# TYPE incident_operator_fixes gauge"]
@@ -83,7 +80,7 @@ def create_webhook_app(database_url: str, engine=None) -> FastAPI:
         return "\n".join(lines) + "\n"
 
     @app.post("/alertmanager")
-    async def alertmanager(request: Request, c=Depends(_conn)):
+    async def alertmanager(request: Request):
         """Alertmanager webhook (payload version 4): one incident per firing fingerprint; resolves close it."""
         body = await request.json()
         opened = touched = resolved = 0
@@ -91,9 +88,9 @@ def create_webhook_app(database_url: str, engine=None) -> FastAPI:
             if not alert.get("fingerprint"):
                 continue
             if alert.get("status") == "resolved":
-                resolved += db.record_resolved(c, alert) is not None
+                resolved += store.record_resolved(alert) is not None
             else:
-                _, created = db.record_firing(c, alert)
+                _, created = store.record_firing(alert)
                 opened += created
                 touched += not created
         if opened or resolved:
@@ -198,8 +195,8 @@ def _add_signin(app: FastAPI, settings: UiSettings) -> Callable[[Request], dict 
     return current_user
 
 
-def create_ui_app(database_url: str, settings: UiSettings, library: Library | None = None) -> FastAPI:
-    app = _pool_app(database_url, "incident-operator")
+def create_ui_app(store: db.Store, settings: UiSettings, library: Library | None = None) -> FastAPI:
+    app = _base_app("incident-operator")
     page = files("incident_operator").joinpath("static/index.html").read_text()
     current_user = _add_signin(app, settings)
     anonymous_ok = settings.allow_anonymous_decisions and not settings.oidc_issuer
@@ -219,32 +216,28 @@ def create_ui_app(database_url: str, settings: UiSettings, library: Library | No
         return page
 
     @app.get("/api/incidents")
-    def incidents(c=Depends(_conn)):
-        return {"incidents": db.list_incidents(c),
-                "needs_runbook": db.needs_runbook(c, library.covers if library else None)}
+    def incidents():
+        return {"incidents": store.list_incidents(),
+                "needs_runbook": store.needs_runbook(library.covers if library else None)}
 
     @app.get("/api/incidents/{incident_id}")
-    def incident(incident_id: int, c=Depends(_conn)):
-        inc = db.get_incident(c, incident_id)
+    def incident(incident_id: int):
+        inc = store.get_incident(incident_id)
         if inc is None:
             raise HTTPException(404, "no such incident")
-        inc["related"] = db.related(c, inc)
-        for r in inc["related"]["nearby"]:
-            r["subject"] = investigate.alert_subject(r["labels"])
-        inc["rerun_models"] = models
-        return inc
+        return incident_json(inc, store, models)
 
     def json_only(request: Request) -> None:          # a dependency: this has to run before the body is validated
         if not request.headers.get("content-type", "").startswith("application/json"):
             raise HTTPException(415, "send application/json")
 
     @app.post("/api/incidents/{incident_id}/rerun", dependencies=[Depends(json_only)])
-    def rerun(incident_id: int, body: Rerun, request: Request, c=Depends(_conn)):
+    def rerun(incident_id: int, body: Rerun, request: Request):
         # JSON only, signed in: the same rules as deciding on a fix. It spends GPU time and supersedes a waiting fix.
         who = decider(request)
         if body.model not in {m["name"] for m in models}:
             raise HTTPException(422, f"{body.model!r} isn't a model a re-run can use")
-        why_not = db.begin_rerun(c, incident_id, body.model, who)
+        why_not = store.begin_rerun(incident_id, body.model, who)
         if why_not:
             raise HTTPException(404 if why_not == "no such incident" else 409, why_not)
         log.info("incident %s: re-run with %s by %s", incident_id, body.model, who)
@@ -255,32 +248,33 @@ def create_ui_app(database_url: str, settings: UiSettings, library: Library | No
         user = current_user(request)
         return {"user": user and (user.get("name") or user["sub"]), "can_decide": bool(user) or anonymous_ok}
 
-    def decide(run_id: int, approve: bool, request: Request, c) -> dict | None:
+    def decide(run_id: int, approve: bool, request: Request) -> dict | None:
         # JSON only: a cross-site form can't send it without a preflight, and the session cookie is SameSite=Lax.
         if not request.headers.get("content-type", "").startswith("application/json"):
             raise HTTPException(415, "send application/json")
         who = decider(request)
-        if not db.decide_op_run(c, run_id, approve, who):
+        if not store.decide_op_run(run_id, approve, who):
             raise HTTPException(409, "this fix isn't waiting for a decision (already decided, or suggest-only)")
         log.info("fix run %s %s by %s", run_id, "approved" if approve else "rejected", who)
-        return db.get_op_run(c, run_id)
+        run = store.get_op_run(run_id)
+        return run.to_dict() if run else None
 
     @app.post("/api/fixes/{run_id}/approve")
-    def approve(run_id: int, request: Request, c=Depends(_conn)):
-        return decide(run_id, True, request, c)
+    def approve(run_id: int, request: Request):
+        return decide(run_id, True, request)
 
     @app.post("/api/fixes/{run_id}/reject")
-    def reject(run_id: int, request: Request, c=Depends(_conn)):
-        return decide(run_id, False, request, c)
+    def reject(run_id: int, request: Request):
+        return decide(run_id, False, request)
 
     @app.get("/api/runbooks")
-    def runbooks(c=Depends(_conn)):
+    def runbooks():
         lib = library.describe() if library else {"runbooks": [], "operations": [], "errors": []}
-        used = {r["runbook"]: r for r in db.runbook_usage(c)}
+        used = {r["runbook"]: r for r in store.runbook_usage()}
         for r in lib["runbooks"]:
             u = used.get(r["name"]) or {}
             r["incidents"], r["last_matched"] = u.get("incidents", 0), u.get("last_matched")
-        records = {r["operation"]: r for r in db.operation_records(c)}
+        records = {r["operation"]: r for r in store.operation_records()}
         for o in lib["operations"]:
             if o["mutating"]:
                 o["record"] = records.get(o["name"]) or {}

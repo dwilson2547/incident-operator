@@ -84,7 +84,10 @@ as untyped dicts. It becomes SQLAlchemy 2.0 models and Alembic migrations (docs/
 - [x] Models and a baseline migration (`models.py`, `migrations/`). A schema dump of a database built from them is
       identical to production's (2026-11-21); `alembic check` is clean against a database the old DDL built;
       `tests/test_schema.py` fails when the models change with no migration, CHECKs included.
-- [ ] `db.py` queries ported to the models, one function at a time; callers read attributes (`inc.labels`), so
-      pyright checks every column. The executor's claim keeps `FOR UPDATE SKIP LOCKED`.
+- [x] `db.py` ported to the models as `db.Store` (one engine and session factory); callers read attributes
+      (`inc.labels`), so pyright checks every column. The executor's claim keeps `FOR UPDATE SKIP LOCKED`. One
+      change, not one function at a time: every caller took a connection, so they all moved together. The two list
+      reads with window functions (`list_incidents`, `related`) stay SQL through `text()` and return dicts/TypedDicts.
+      No separate domain layer: `triage.py` and `fixes.py` already are one, with the Store as their repository.
 - [ ] Startup runs `schema.upgrade` instead of `SCHEMA`; production stamped at `0001` first (docs/database.md).
 - [ ] Final check: the API's JSON responses from old and new code, on a copy of production data, compared.

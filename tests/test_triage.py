@@ -1,15 +1,17 @@
 """Intake, the triage engine and the email, with a fake gpu-scheduler, a fake Kubernetes and a real local SMTP
 server."""
 import uuid
+from datetime import UTC, datetime
 from unittest.mock import ANY
 
-from conftest import URL, alert, needs_pg
+from conftest import alert, needs_pg, sql
 from fastapi.testclient import TestClient
 from test_evidence import EVENTS, POD, FakeK8s
 from testconfig import smtp_config, triage_config, ui_settings
 
 from incident_operator import db
 from incident_operator.app import create_ui_app, create_webhook_app
+from incident_operator.models import Incident
 from incident_operator.notify import Notifier, compose
 from incident_operator.ops import Runner
 from incident_operator.states import IncidentStatus
@@ -53,89 +55,89 @@ def k8s():
                     "/api/v1/namespaces/gyopart/pods/x/log?previous=true": "Broken: 0 vehicles"})
 
 
-def engine(conn, gpu, mail, tmp_path):
+def engine(store, gpu, mail, tmp_path):
     primer = tmp_path / "primer.md"
     primer.write_text("Exit 65 = Broken: permanent.")
     cluster = k8s()
-    return Engine(conn, triage_config(primer_path=str(primer)), cluster, gpu, mail, Runner(cluster))
+    return Engine(store, triage_config(primer_path=str(primer)), cluster, gpu, mail, Runner(cluster))
 
 
-def test_intake_dedupes_and_resolves(conn):
-    a1, created = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
-    a2, again = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
+def test_intake_dedupes_and_resolves(store):
+    a1, created = store.record_firing(alert(namespace="gyopart", pod="x"))
+    a2, again = store.record_firing(alert(namespace="gyopart", pod="x"))
     assert created and not again and a1 == a2
-    assert db.record_resolved(conn, alert(status="resolved")) == a1
-    assert db.record_resolved(conn, alert(status="resolved")) is None            # nothing open any more
-    a3, created3 = db.record_firing(conn, alert())                                # fires again: a new incident
+    assert store.record_resolved(alert(status="resolved")) == a1
+    assert store.record_resolved(alert(status="resolved")) is None            # nothing open any more
+    a3, created3 = store.record_firing(alert())                                # fires again: a new incident
     assert created3 and a3 != a1
 
 
-def test_full_triage_flow(conn, tmp_path):
+def test_full_triage_flow(store, tmp_path):
     gpu, mail = FakeGpu(), Mailbox()
-    e = engine(conn, gpu, mail, tmp_path)
-    inc_id, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
+    e = engine(store, gpu, mail, tmp_path)
+    inc_id, _ = store.record_firing(alert(namespace="gyopart", pod="x"))
     assert e.step() == 1                                                          # evidence + submit
-    inc = db.incident(conn, inc_id)
-    assert inc["status"] == "triaging" and [x["kind"] for x in inc["evidence"]] == ["pod", "events", "logs", "logs"]
-    (turn,) = inc["turns"]
-    assert turn["prompt_version"] == PROMPT_VERSION and turn["fallback"] == ["gemma4-26b-a4b"]
-    system, user = turn["messages"]
+    inc = store.incident(inc_id)
+    assert inc.status == "triaging" and [x.kind for x in inc.evidence] == ["pod", "events", "logs", "logs"]
+    (turn,) = inc.turns
+    assert turn.prompt_version == PROMPT_VERSION and turn.fallback == ["gemma4-26b-a4b"]
+    system, user = turn.messages
     assert "Exit 65 = Broken" in system["content"] and "Where it failed:" in system["content"]
     assert "KubePodCrashLooping" in user["content"] and "Broken: 0 vehicles" in user["content"]
     assert e.step() == 0                                                          # still queued: nothing moves
     gpu.finish()
     assert e.step() == 2                                                          # analysed, then mailed
-    inc = db.incident(conn, inc_id)
-    assert (inc["status"], inc["analysis_model"], inc["analysis_worker"]) == ("analysed", "gemma4-26b-a4b", "mac-mini")
-    assert inc["turns"][0]["ran_model"] == "gemma4-26b-a4b" and inc["notified_at"] is not None
+    inc = store.incident(inc_id)
+    assert (inc.status, inc.analysis_model, inc.analysis_worker) == ("analysed", "gemma4-26b-a4b", "mac-mini")
+    assert inc.turns[0].ran_model == "gemma4-26b-a4b" and inc.notified_at is not None
     assert len(mail.sent) == 1 and e.step() == 0                                   # mailed once
 
 
-def test_failed_job_is_reported(conn, tmp_path):
+def test_failed_job_is_reported(store, tmp_path):
     gpu, mail = FakeGpu(), Mailbox()
-    e = engine(conn, gpu, mail, tmp_path)
-    inc_id, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
+    e = engine(store, gpu, mail, tmp_path)
+    inc_id, _ = store.record_firing(alert(namespace="gyopart", pod="x"))
     e.step()
     for j in gpu.jobs.values():
         j.update(status="failed", error="LM Studio refused the job")
     e.step()
-    inc = db.incident(conn, inc_id)
-    assert inc["status"] == "triage_failed" and "refused" in inc["error"] and len(mail.sent) == 1
+    inc = store.incident(inc_id)
+    assert inc.status == "triage_failed" and "refused" in inc.error and len(mail.sent) == 1
 
 
-def test_unreachable_gpu_scheduler_leaves_the_incident_for_the_next_pass(conn, tmp_path):
+def test_unreachable_gpu_scheduler_leaves_the_incident_for_the_next_pass(store, tmp_path):
     gpu, mail = FakeGpu(), Mailbox()
     gpu.down = True
-    e = engine(conn, gpu, mail, tmp_path)
-    inc_id, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
+    e = engine(store, gpu, mail, tmp_path)
+    inc_id, _ = store.record_firing(alert(namespace="gyopart", pod="x"))
     assert e.step() == 0
-    inc = db.incident(conn, inc_id)
-    assert inc["status"] == "new" and inc["evidence"] == []                       # no half-recorded attempt
+    inc = store.incident(inc_id)
+    assert inc.status == "new" and inc.evidence == []                       # no half-recorded attempt
     gpu.down = False
-    assert e.step() == 1 and len(db.incident(conn, inc_id)["evidence"]) == 4  # collected once
+    assert e.step() == 1 and len(store.incident(inc_id).evidence) == 4  # collected once
 
 
 def test_build_messages_shows_labels_and_annotations():
-    inc = {"alertname": "KubeJobFailed", "severity": "warning", "starts_at": None, "first_seen": "now",
-           "labels": {"alertname": "KubeJobFailed", "namespace": "postgres", "job_name": "b1", "prometheus": "x"},
-           "annotations": {"summary": "Job failed to complete."}}
+    inc = Incident(alertname="KubeJobFailed", severity="warning", starts_at=None, first_seen=datetime.now(UTC),
+                   labels={"alertname": "KubeJobFailed", "namespace": "postgres", "job_name": "b1", "prometheus": "x"},
+                   annotations={"summary": "Job failed to complete."})
     system, user = build_messages(inc, "--- job postgres/b1\nfailed=1", "")
     assert "job_name=b1" in user["content"] and "prometheus" not in user["content"]
     assert "Summary: Job failed to complete." in user["content"] and "failed=1" in user["content"]
 
 
-def test_email_composition(conn):
-    inc_id, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
-    db.set_status(conn, inc_id, IncidentStatus.ANALYSED, analysis="Where it failed: the scraper.",
+def test_email_composition(store):
+    inc_id, _ = store.record_firing(alert(namespace="gyopart", pod="x"))
+    store.set_status(inc_id, IncidentStatus.ANALYSED, analysis="Where it failed: the scraper.",
                   analysis_model="qwen35-9b", analysis_worker="ainode")
-    msg = compose(db.incident(conn, inc_id), smtp_config(sender="a@b", to=["c@d"], public_url="http://io.local"))
+    msg = compose(store.incident(inc_id), smtp_config(sender="a@b", to=["c@d"], public_url="http://io.local"))
     assert msg["Subject"] == "[triage] KubePodCrashLooping · namespace=gyopart pod=x"
     body = msg.get_content()
     assert "Where it failed: the scraper." in body and "Answered by qwen35-9b on ainode" in body
     assert f"http://io.local/#/incident/{inc_id}" in body and "nothing was changed" in body
 
 
-def test_email_goes_through_smtp(conn):
+def test_email_goes_through_smtp(store):
     from aiosmtpd.controller import Controller
     got = []
 
@@ -150,17 +152,17 @@ def test_email_goes_through_smtp(conn):
     ctl = Controller(Handler(), hostname="127.0.0.1", port=port)
     ctl.start()
     try:
-        inc_id, _ = db.record_firing(conn, alert())
-        db.set_status(conn, inc_id, IncidentStatus.ANALYSED, analysis="ok")
+        inc_id, _ = store.record_firing(alert())
+        store.set_status(inc_id, IncidentStatus.ANALYSED, analysis="ok")
         Notifier(smtp_config(host="127.0.0.1", port=port, starttls=False,
-                             sender="io@x", to=["me@x"])).send_incident(db.incident(conn, inc_id))
+                             sender="io@x", to=["me@x"])).send_incident(store.incident(inc_id))
     finally:
         ctl.stop()
     assert got and got[0].rcpt_tos == ["me@x"] and b"[triage] KubePodCrashLooping" in got[0].content
 
 
-def test_webhook_and_ui_apps(conn):
-    with TestClient(create_webhook_app(URL)) as wh, TestClient(create_ui_app(URL, ui_settings())) as ui:
+def test_webhook_and_ui_apps(store):
+    with TestClient(create_webhook_app(store)) as wh, TestClient(create_ui_app(store, ui_settings())) as ui:
         payload = {"version": "4", "status": "firing", "alerts": [alert("a", namespace="n", pod="p"), alert("b"),
                                                                     {"status": "firing", "labels": {}}]}
         assert wh.post("/alertmanager", json=payload).json() == {"opened": 2, "updated": 0, "resolved": 0}
@@ -177,7 +179,7 @@ def test_webhook_and_ui_apps(conn):
 
 
 @needs_pg
-def test_needs_runbook_leaves_out_incidents_a_runbook_now_matches(conn, tmp_path):
+def test_needs_runbook_leaves_out_incidents_a_runbook_now_matches(store, tmp_path):
     from incident_operator.library import Library
     (tmp_path / "runbooks").mkdir()
     (tmp_path / "runbooks" / "crash-in-n.md").write_text(       # written after both incidents fired
@@ -185,7 +187,7 @@ def test_needs_runbook_leaves_out_incidents_a_runbook_now_matches(conn, tmp_path
     lib = Library(str(tmp_path / "runbooks"), None)
     lib.refresh()
     assert "crash-in-n" in lib.runbooks, lib.errors
-    with TestClient(create_webhook_app(URL)) as wh, TestClient(create_ui_app(URL, ui_settings(), lib)) as ui:
+    with TestClient(create_webhook_app(store)) as wh, TestClient(create_ui_app(store, ui_settings(), lib)) as ui:
         wh.post("/alertmanager", json={"alerts": [alert("a", namespace="n", pod="p"), alert("b", namespace="m")]})
         # the runbook matches on namespace too, so only the incident in n is covered, not the alertname as a whole
         assert ui.get("/api/incidents").json()["needs_runbook"] == [
@@ -205,86 +207,86 @@ def test_problem_key_ignores_generated_names():
     assert db.problem_key(node) != db.problem_key({**node, "instance": "192.168.0.37:9100"})
 
 
-def test_flapping_alert_is_triaged_and_mailed_once(conn, tmp_path):
+def test_flapping_alert_is_triaged_and_mailed_once(store, tmp_path):
     gpu, mail = FakeGpu(), Mailbox()
-    e = engine(conn, gpu, mail, tmp_path)
-    first, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
+    e = engine(store, gpu, mail, tmp_path)
+    first, _ = store.record_firing(alert(namespace="gyopart", pod="x"))
     e.step()
     gpu.finish()
     e.step()
     for _ in range(5):                                                            # resolve, fire, resolve, ...
-        db.record_resolved(conn, alert(status="resolved"))
-        db.record_firing(conn, alert(namespace="gyopart", pod="x"))
+        store.record_resolved(alert(status="resolved"))
+        store.record_firing(alert(namespace="gyopart", pod="x"))
         e.step()
     assert len(gpu.submitted) == 1 and len(mail.sent) == 1
-    with TestClient(create_ui_app(URL, ui_settings())) as ui:
+    with TestClient(create_ui_app(store, ui_settings())) as ui:
         d = ui.get("/api/incidents").json()
     assert [(i["id"], i["repeats"], i["repeats_open"]) for i in d["incidents"]] == [(first, 5, 1)]
-    assert len(db.incident(conn, first)["repeats"]) == 5
+    assert len(store.repeats(first)) == 5
 
 
-def test_cronjob_runs_under_new_names_are_repeats(conn, tmp_path):
+def test_cronjob_runs_under_new_names_are_repeats(store, tmp_path):
     gpu, mail = FakeGpu(), Mailbox()
-    e = engine(conn, gpu, mail, tmp_path)
-    first, _ = db.record_firing(conn, alert("r1", namespace="gyopart", job_name="backup-29886270"))
+    e = engine(store, gpu, mail, tmp_path)
+    first, _ = store.record_firing(alert("r1", namespace="gyopart", job_name="backup-29886270"))
     e.step()
-    second, _ = db.record_firing(conn, alert("r2", namespace="gyopart", job_name="backup-29886271"))
+    second, _ = store.record_firing(alert("r2", namespace="gyopart", job_name="backup-29886271"))
     e.step()
-    inc = db.incident(conn, second)
-    assert (inc["status"], inc["repeat_of"]) == ("repeat", first) and len(gpu.submitted) == 1
+    inc = store.incident(second)
+    assert (inc.status, inc.repeat_of) == ("repeat", first) and len(gpu.submitted) == 1
 
 
-def test_after_the_window_it_is_triaged_again(conn, tmp_path):
+def test_after_the_window_it_is_triaged_again(store, tmp_path):
     gpu, mail = FakeGpu(), Mailbox()
-    e = engine(conn, gpu, mail, tmp_path)
-    first, _ = db.record_firing(conn, alert(namespace="gyopart", pod="x"))
+    e = engine(store, gpu, mail, tmp_path)
+    first, _ = store.record_firing(alert(namespace="gyopart", pod="x"))
     e.step()
-    conn.execute("UPDATE incidents SET first_seen = now() - interval '7 hours' WHERE id = %s", (first,))
-    db.record_resolved(conn, alert(status="resolved"))
-    db.record_firing(conn, alert(namespace="gyopart", pod="x"))
+    sql(store, "UPDATE incidents SET first_seen = now() - interval '7 hours' WHERE id = %s", (first,))
+    store.record_resolved(alert(status="resolved"))
+    store.record_firing(alert(namespace="gyopart", pod="x"))
     e.step()
     assert len(gpu.submitted) == 2
 
 
-def test_hourly_cap_holds_the_rest_and_skips_long_resolved(conn, tmp_path):
+def test_hourly_cap_holds_the_rest_and_skips_long_resolved(store, tmp_path):
     gpu, mail = FakeGpu(), Mailbox()
-    e = engine(conn, gpu, mail, tmp_path)
+    e = engine(store, gpu, mail, tmp_path)
     e.cfg.max_per_hour = 2
-    ids = [db.record_firing(conn, alert(f"s{k}", namespace="gyopart", pod=f"app{k}-x"))[0] for k in range(4)]
+    ids = [store.record_firing(alert(f"s{k}", namespace="gyopart", pod=f"app{k}-x"))[0] for k in range(4)]
     e.step()
-    assert [db.incident(conn, i)["status"] for i in ids] == ["triaging", "triaging", "new", "new"]
+    assert [store.incident(i).status for i in ids] == ["triaging", "triaging", "new", "new"]
     # one waiting incident resolves long before there is room again: dropped, the other still waits
-    conn.execute("UPDATE incidents SET alert_resolved_at = now() - interval '2 hours' WHERE id = %s", (ids[2],))
+    sql(store, "UPDATE incidents SET alert_resolved_at = now() - interval '2 hours' WHERE id = %s", (ids[2],))
     e.step()
-    assert [db.incident(conn, i)["status"] for i in ids[2:]] == ["skipped", "new"]
-    conn.execute("UPDATE model_turns SET submitted_at = now() - interval '2 hours'")    # the hour passes
+    assert [store.incident(i).status for i in ids[2:]] == ["skipped", "new"]
+    sql(store, "UPDATE model_turns SET submitted_at = now() - interval '2 hours'")    # the hour passes
     e.step()
-    assert db.incident(conn, ids[3])["status"] == "triaging" and len(gpu.submitted) == 3
+    assert store.incident(ids[3]).status == "triaging" and len(gpu.submitted) == 3
 
 
-def test_migrates_a_phase_1_database(conn):
-    conn.execute("DROP TABLE op_runs, evidence, model_turns, incidents")
+def test_migrates_a_phase_1_database(store):
+    sql(store, "DROP TABLE op_runs, evidence, model_turns, incidents")
     old = db.SCHEMA.split("-- Added after the first release")[0].replace(", 'repeat', 'skipped'", "")
-    conn.execute(old)
-    conn.execute("INSERT INTO incidents (fingerprint, alertname, labels, annotations) VALUES ('f', 'A', '{}', '{}')")
-    db.migrate(conn)
-    db.migrate(conn)                                                               # and again: idempotent
-    conn.execute("UPDATE incidents SET status = 'repeat'")
+    sql(store, old)
+    sql(store, "INSERT INTO incidents (fingerprint, alertname, labels, annotations) VALUES ('f', 'A', '{}', '{}')")
+    store.migrate()
+    store.migrate()                                                               # and again: idempotent
+    sql(store, "UPDATE incidents SET status = 'repeat'")
 
 
 @needs_pg
-def test_metrics_for_the_operators_own_alerts(conn):
+def test_metrics_for_the_operators_own_alerts(store):
     from types import SimpleNamespace
 
     from fastapi.testclient import TestClient
 
     from incident_operator.app import create_webhook_app
-    db.record_firing(conn, alert("a"))
-    conn.execute("UPDATE incidents SET first_seen = now() - interval '2 hours'")
-    i, _ = db.record_firing(conn, alert("b"))
-    db.set_status(conn, i, IncidentStatus.ANALYSED)
+    store.record_firing(alert("a"))
+    sql(store, "UPDATE incidents SET first_seen = now() - interval '2 hours'")
+    i, _ = store.record_firing(alert("b"))
+    store.set_status(i, IncidentStatus.ANALYSED)
     engine = SimpleNamespace(last_pass=None)
-    with TestClient(create_webhook_app(conn.info.dsn, engine)) as c:
+    with TestClient(create_webhook_app(store, engine)) as c:
         text = c.get("/metrics").text
         assert 'incident_operator_incidents{status="new"} 1' in text
         assert 'incident_operator_incidents{status="analysed"} 1' in text

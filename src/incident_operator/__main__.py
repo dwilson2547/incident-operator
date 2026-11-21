@@ -57,17 +57,17 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     log.info("triage: %s, fallback %s after %ss; email %s", cfg.model, cfg.fallback, cfg.fallback_after_seconds,
              f"to {', '.join(smtp.to)}" if smtp.usable else "off")
-    conn = db.connect(url)
-    db.migrate(conn)
-    library = Library(runbooks_dir, operations_dir, store=db.LastGood(conn))
+    store = db.Store(url)                         # one pool for the engine thread and both servers
+    store.migrate()
+    library = Library(runbooks_dir, operations_dir, store=db.LastGood(store))
     library.refresh()
-    engine = Engine(conn, cfg, k8s, GpuScheduler(cfg), Notifier(smtp) if smtp.usable else None, runner,
+    engine = Engine(store, cfg, k8s, GpuScheduler(cfg), Notifier(smtp) if smtp.usable else None, runner,
                     library=library)
     threading.Thread(target=engine.run_forever, name="triage", daemon=True).start()
 
-    servers = [_Server(uvicorn.Config(create_ui_app(url, ui, library), host="0.0.0.0", port=ui_port,
+    servers = [_Server(uvicorn.Config(create_ui_app(store, ui, library), host="0.0.0.0", port=ui_port,
                                       log_level="warning")),
-               _Server(uvicorn.Config(create_webhook_app(url, engine), host="0.0.0.0", port=hook_port,
+               _Server(uvicorn.Config(create_webhook_app(store, engine), host="0.0.0.0", port=hook_port,
                                       log_level="warning"))]
 
     def stop(*_):

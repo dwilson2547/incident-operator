@@ -14,9 +14,14 @@ chooses: parameters come from the alert, and a human approves before anything ru
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 from .library import Runbook
 from .ops import Result
+
+if TYPE_CHECKING:
+    from .db import Related
+    from .models import Incident
 
 PROMPT_VERSION = "runbook-v5"
 MAX_ROUNDS = 3
@@ -108,12 +113,12 @@ def investigation_schema(menu: list[str], final: bool) -> dict:
     }
 
 
-def alert_block(incident: dict, target: dict | None) -> str:
-    labels = incident["labels"]
-    ann = incident.get("annotations") or {}
+def alert_block(incident: Incident, target: dict | None) -> str:
+    labels = incident.labels
+    ann = incident.annotations or {}
     shown = {k: v for k, v in labels.items() if k not in ("alertname", "severity", "prometheus")}
-    lines = [f"Alert: {incident['alertname']} (severity: {incident.get('severity') or 'unknown'}), firing since "
-             f"{incident.get('starts_at') or incident['first_seen']}",
+    lines = [f"Alert: {incident.alertname} (severity: {incident.severity or 'unknown'}), firing since "
+             f"{incident.starts_at or incident.first_seen}",
              "Labels: " + ", ".join(f"{k}={v}" for k, v in sorted(shown.items()))]
     for key in ("summary", "description", "message"):
         if ann.get(key):
@@ -143,7 +148,7 @@ def _span(seconds: float) -> str:
     return f"{round(minutes / 60)}h" if minutes < 2880 else f"{round(minutes / 1440)}d"
 
 
-def related_block(related: dict) -> str:
+def related_block(related: Related) -> str:
     """db.related() for the model: built by code, so it reaches each step whatever an earlier step's reply kept. Times
     and labels only, never another incident's findings or logs, so text from one incident can't steer another. The
     counts are worked out here because a small model miscounts lists."""
@@ -194,7 +199,7 @@ def menu_text(runbook: Runbook, library_ops: dict) -> tuple[list[str], str]:
     return menu, "\n".join(f"- {n}: {library_ops[n].description}" for n in menu) or "(nothing: finish now)"
 
 
-def first_messages(incident: dict, runbook: Runbook, target: dict | None, precursors: list[Result],
+def first_messages(incident: Incident, runbook: Runbook, target: dict | None, precursors: list[Result],
                    menu: str, primer: str, related: str = "", rounds: int = MAX_ROUNDS - 1,
                    budget: int = PRECURSOR_CHARS) -> list[dict]:
     system = (INVESTIGATE_SYSTEM + ("\n\n" + primer if primer else "")
@@ -231,7 +236,7 @@ def fixes_text(runbook: Runbook, library_ops: dict) -> tuple[list[str], str]:
     return names, "\n".join(f"- {n}: {library_ops[n].description}" for n in names) or "(none: answer \"none\")"
 
 
-def remediation_messages(incident: dict, runbook: Runbook, target: dict | None, findings: dict, primer: str,
+def remediation_messages(incident: Incident, runbook: Runbook, target: dict | None, findings: dict, primer: str,
                          fixes: str = "(none: answer \"none\")", related: str = "") -> list[dict]:
     guidance = runbook.section("Remediation") or runbook.body
     system = (REMEDIATE_SYSTEM + ("\n\n" + primer if primer else "")

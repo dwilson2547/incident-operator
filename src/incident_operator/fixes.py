@@ -19,6 +19,7 @@ import shlex
 
 from . import db
 from .library import EXPECT, Check, Operation
+from .models import Incident
 from .ops import SAFE_VALUE, ParamError, Result, Runner, fill, resolve_params
 from .states import FixStatus, Trigger
 
@@ -73,33 +74,34 @@ def command(op: Operation, params: dict) -> str:
     return json.dumps(run)
 
 
-def propose(conn, incident: dict, runbook, op: Operation) -> int:
+def propose(store: db.Store, incident: Incident, runbook, op: Operation) -> int:
     """Record a proposed fix. A fix whose parameters can't be resolved is recorded as refused, with why."""
     autonomy = runbook.fixes.get(op.name, op.autonomy)
     try:
-        params = fix_params(op, incident.get("target"), incident["labels"])
+        params = fix_params(op, incident.target, incident.labels)
     except ParamError as e:
-        return db.add_op_run(conn, incident["id"], op.name, op.rev, {}, autonomy, FixStatus.REFUSED, error=str(e))
+        return store.add_op_run(incident.id, op.name, op.rev, {}, autonomy, FixStatus.REFUSED, error=str(e))
     status = FixStatus.SUGGESTED if autonomy == "suggest" else FixStatus.PROPOSED
-    return db.add_op_run(conn, incident["id"], op.name, op.rev, params, autonomy, status, command=command(op, params))
+    return store.add_op_run(incident.id, op.name, op.rev, params, autonomy, status, command=command(op, params))
 
 
-def over_limit(conn, op: Operation, params: dict) -> str | None:
+def over_limit(store: db.Store, op: Operation, params: dict) -> str | None:
     n, secs = op.limits["perTarget"]
-    if db.op_runs_since(conn, op.name, secs, params) >= n:
+    if store.op_runs_since(op.name, secs, params) >= n:
         return f"limit: {op.name} already ran {n} time(s) on this target in the last {secs // 60} minutes"
     n, secs = op.limits["global"]
-    if db.op_runs_since(conn, op.name, secs) >= n:
+    if store.op_runs_since(op.name, secs) >= n:
         return f"limit: {op.name} already ran {n} time(s) in the last {secs // 60} minutes"
     return None
 
 
-def run_checks(runner: Runner, library, checks: list[Check], incident: dict) -> tuple[bool, list[Result], list[str]]:
+def run_checks(runner: Runner, library, checks: list[Check],
+               incident: Incident) -> tuple[bool, list[Result], list[str]]:
     """Run each check's operation fresh and test its expectation. Returns (all passed, results, one line per check)."""
     results, lines, ok, cache = [], [], True, {}
     for c in checks:
         if c.op not in cache:
-            cache[c.op] = runner.run(library.operations[c.op], incident.get("target"), incident["labels"], {})
+            cache[c.op] = runner.run(library.operations[c.op], incident.target, incident.labels, {})
             results.append(cache[c.op])
         r = cache[c.op]
         if r.error:
@@ -111,48 +113,49 @@ def run_checks(runner: Runner, library, checks: list[Check], incident: dict) -> 
     return ok, results, lines
 
 
-def step(conn, library, runner: Runner) -> int:
+def step(store: db.Store, library, runner: Runner) -> int:
     """One pass: pre-check approved runs, post-check settled ones, time out runs the executor never took."""
     n = 0
-    for run in db.op_runs_with_status(conn, FixStatus.APPROVED):
+    for run in store.op_runs_with_status(FixStatus.APPROVED):
         n += 1
-        op = library.operations.get(run["operation"])
-        inc = db.incident(conn, run["incident_id"])
+        op = library.operations.get(run.operation)
+        inc = store.incident(run.incident_id)
         if op is None or not op.mutating:
-            db.update_op_run(conn, run["id"], FixStatus.REFUSED, error="the operation is no longer loaded")
+            store.update_op_run(run.id, FixStatus.REFUSED, error="the operation is no longer loaded")
             continue
-        if op.rev != run["op_rev"]:
-            db.update_op_run(conn, run["id"], FixStatus.REFUSED,
-                             error=f"{op.name} changed since it was proposed ({run['op_rev']} -> {op.rev})")
+        if op.rev != run.op_rev:
+            store.update_op_run(run.id, FixStatus.REFUSED,
+                                error=f"{op.name} changed since it was proposed ({run.op_rev} -> {op.rev})")
             continue
-        if why := over_limit(conn, op, run["params"]):
-            db.update_op_run(conn, run["id"], FixStatus.REFUSED, error=why)
+        if why := over_limit(store, op, run.params):
+            store.update_op_run(run.id, FixStatus.REFUSED, error=why)
             continue
         ok, results, lines = run_checks(runner, library, op.pre, inc) if op.pre else (True, [], [])
-        db.add_results(conn, inc["id"], results, Trigger.PRE)
+        store.add_results(inc.id, results, Trigger.PRE)
         if not ok:
-            db.update_op_run(conn, run["id"], FixStatus.REFUSED, checks="\n".join(lines),
-                             error="a pre-check failed: the situation isn't what the fix is for (any more)")
+            store.update_op_run(run.id, FixStatus.REFUSED, checks="\n".join(lines),
+                                error="a pre-check failed: the situation isn't what the fix is for (any more)")
             continue
-        db.update_op_run(conn, run["id"], FixStatus.READY, checks="\n".join(lines))
-        log.info("fix %s (%s) for incident %s: pre-checks passed, ready", run["id"], op.name, inc["id"])
-    for run in db.op_runs_due_for_post(conn):
+        store.update_op_run(run.id, FixStatus.READY, checks="\n".join(lines))
+        log.info("fix %s (%s) for incident %s: pre-checks passed, ready", run.id, op.name, inc.id)
+    for run in store.op_runs_due_for_post():
         n += 1
-        op = library.operations.get(run["operation"])
-        inc = db.incident(conn, run["incident_id"])
+        op = library.operations.get(run.operation)
+        inc = store.incident(run.incident_id)
         if op is None:
-            db.update_op_run(conn, run["id"], FixStatus.POST_FAILED,
-                             error="the operation is no longer loaded: not verified")
+            store.update_op_run(run.id, FixStatus.POST_FAILED,
+                                error="the operation is no longer loaded: not verified")
             continue
         ok, results, lines = run_checks(runner, library, op.post, inc)
-        db.add_results(conn, inc["id"], results, Trigger.POST)
-        prior = run.get("checks") or ""
+        store.add_results(inc.id, results, Trigger.POST)
+        prior = run.checks or ""
         status = FixStatus.SUCCEEDED if ok else FixStatus.POST_FAILED
-        db.update_op_run(conn, run["id"], status,
-                         checks=(prior + "\n" if prior else "") + "\n".join(lines),
-                         error=None if ok else "a post-check failed: the fix didn't take; see the runbook's escalation")
-        log.info("fix %s (%s) for incident %s: %s", run["id"], op.name, inc["id"], status)
-    n += db.expire_ready(conn, READY_TIMEOUT_SECONDS)
+        store.update_op_run(run.id, status,
+                            checks=(prior + "\n" if prior else "") + "\n".join(lines),
+                            error=None if ok else
+                            "a post-check failed: the fix didn't take; see the runbook's escalation")
+        log.info("fix %s (%s) for incident %s: %s", run.id, op.name, inc.id, status)
+    n += store.expire_ready(READY_TIMEOUT_SECONDS)
     return n
 
 

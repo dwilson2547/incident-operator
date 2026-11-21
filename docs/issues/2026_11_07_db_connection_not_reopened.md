@@ -79,3 +79,9 @@ straight 200s from `/metrics`. It fails on the old code.
 - `src/incident_operator/app.py` — `_pool_app`: `check=ConnectionPool.check_connection` (follow-up)
 - `tests/test_db_reconnect.py` — new; pool test added in the follow-up
 - `helm/incident-operator/values-prod.yaml` — image `sha-7d3fa161cf8e`
+
+## Since (2026-11-21)
+
+`db.Store` replaced both the wrapper and the psycopg pool: one SQLAlchemy engine with `pool_pre_ping=True` for the
+engine thread and both apps, which tests each connection on checkout the way `check` did. Both tests in
+`tests/test_db_reconnect.py` still cover it.

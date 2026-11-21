@@ -3,7 +3,7 @@ import shutil
 import subprocess
 
 import pytest
-from conftest import alert, needs_pg
+from conftest import alert, needs_pg, sql
 from fastapi.testclient import TestClient
 from test_evidence import FakeK8s
 from test_runbooks import CHART, FINDINGS, FakeProm, ScriptedGpu, load
@@ -12,6 +12,7 @@ from testconfig import smtp_config, triage_config, ui_settings
 from incident_operator import db, executor, fixes
 from incident_operator.app import create_ui_app
 from incident_operator.library import Library
+from incident_operator.models import Incident, OpRun
 from incident_operator.ops import Prometheus, Result, Runner
 from incident_operator.states import FixStatus
 from incident_operator.triage import Engine
@@ -95,13 +96,13 @@ def cluster(pods=1, ds_unavailable=None):
     })
 
 
-def op_run(conn, run_id: int) -> dict:
-    run = db.get_op_run(conn, run_id)
+def op_run(store, run_id: int) -> OpRun:
+    run = store.get_op_run(run_id)
     assert run is not None
     return run
 
 
-def setup(conn, tmp_path, replies=None, k8s=None, lib=None):
+def setup(store, tmp_path, replies=None, k8s=None, lib=None):
     k8s = k8s or cluster()
     runner = ProbeStub(k8s, ClusterProm())
     runner.dstate = WEDGED
@@ -109,7 +110,7 @@ def setup(conn, tmp_path, replies=None, k8s=None, lib=None):
     primer = tmp_path / "primer.md"
     primer.write_text("")
     gpu = ScriptedGpu(replies or [{"action": "done", "requests": [], "reason": "r", "findings": FINDINGS}, ADVICE_FIX])
-    e = Engine(conn, triage_config(primer_path=str(primer)), k8s, gpu, mail, runner, library=lib or load(CHART))
+    e = Engine(store, triage_config(primer_path=str(primer)), k8s, gpu, mail, runner, library=lib or load(CHART))
     return e, k8s, runner, mail
 
 
@@ -117,15 +118,15 @@ def wedge_alert(fp="w1"):
     return alert(fp, alertname="NodeLoadHighCPUIdle", instance="192.168.0.36:9100")
 
 
-def analysed(conn, e):
-    inc_id, _ = db.record_firing(conn, wedge_alert())
+def analysed(store, e):
+    inc_id, _ = store.record_firing(wedge_alert())
     for _ in range(4):
         e.step()
-    return db.incident(conn, inc_id)
+    return store.incident(inc_id)
 
 
-def approve(conn, run_id, settings=None):
-    with TestClient(create_ui_app(conn.info.dsn, settings or ui_settings(allow_anonymous_decisions=True))) as c:
+def approve(store, run_id, settings=None):
+    with TestClient(create_ui_app(store, settings or ui_settings(allow_anonymous_decisions=True))) as c:
         return c.post(f"/api/fixes/{run_id}/approve", json={})
 
 
@@ -174,73 +175,73 @@ def test_expectations():
 # -- the whole path ---------------------------------------------------------------------------------------------------
 
 @needs_pg
-def test_proposed_approved_executed_and_verified(conn, tmp_path):
-    e, k8s, runner, mail = setup(conn, tmp_path)
-    inc = analysed(conn, e)
-    assert inc["status"] == "analysed" and "Proposed fix: restart-csi-nfs-node" in inc["analysis"]
+def test_proposed_approved_executed_and_verified(store, tmp_path):
+    e, k8s, runner, mail = setup(store, tmp_path)
+    inc = analysed(store, e)
+    assert inc.status == "analysed" and "Proposed fix: restart-csi-nfs-node" in inc.analysis
     assert isinstance(e.gpu, ScriptedGpu)
     remediation = e.gpu.submitted[-1]
     assert remediation[1]["properties"]["operation"]["enum"] == ["restart-csi-nfs-node", "none"]
     assert "restart-csi-nfs-node:" in remediation[0][0]["content"]
-    [run] = inc["fixes"]
-    assert run["status"] == "proposed" and run["params"] == {"node": "k8s-worker1"} and run["autonomy"] == "approve"
+    [run] = inc.fixes
+    assert run.status == "proposed" and run.params == {"node": "k8s-worker1"} and run.autonomy == "approve"
     assert "Proposed fix, waiting for your approval" in _mail_text(e, inc)
 
     e.step()                                                          # nothing runs without approval
-    assert op_run(conn, run["id"])["status"] == "proposed" and not k8s.deleted
+    assert op_run(store, run.id).status == "proposed" and not k8s.deleted
 
-    assert approve(conn, run["id"]).status_code == 200
-    assert approve(conn, run["id"]).status_code == 409                # once
+    assert approve(store, run.id).status_code == 200
+    assert approve(store, run.id).status_code == 409                # once
     e.step()                                                          # pre-checks against a fresh probe
-    r = op_run(conn, run["id"])
-    assert r["status"] == "ready" and r["decided_by"] == "anonymous (local)" and r["checks"].count("pass:") == 4
-    pre = [x for x in db.incident(conn, inc["id"])["evidence"] if x["trigger"] == "pre"]
-    assert [x["operation"] for x in pre] == ["nfs-dstate", "nodes-wedged-now", "tower-load-now"]   # one probe for two
+    r = op_run(store, run.id)
+    assert r.status == "ready" and r.decided_by == "anonymous (local)" and r.checks.count("pass:") == 4
+    pre = [x for x in store.incident(inc.id).evidence if x.trigger == "pre"]
+    assert [x.operation for x in pre] == ["nfs-dstate", "nodes-wedged-now", "tower-load-now"]   # one probe for two
 
     lib = Library(None, str(CHART / "operations"))
-    assert executor.step(conn, lib, k8s) == 1
+    assert executor.step(store, lib, k8s) == 1
     assert k8s.deleted == ["/api/v1/namespaces/kube-system/pods/csi-nfs-node-0"]
-    r = op_run(conn, run["id"])
-    assert r["status"] == "settling" and "deleted pod kube-system/csi-nfs-node-0" in r["result"]
+    r = op_run(store, run.id)
+    assert r.status == "settling" and "deleted pod kube-system/csi-nfs-node-0" in r.result
 
     e.step()
-    assert op_run(conn, run["id"])["status"] == "settling"     # waits out `settle`
-    conn.execute("UPDATE op_runs SET post_due_at = now() WHERE id = %s", (run["id"],))
+    assert op_run(store, run.id).status == "settling"     # waits out `settle`
+    sql(store, "UPDATE op_runs SET post_due_at = now() WHERE id = %s", (run.id,))
     runner.dstate = CLEAR
     e.step()
-    r = op_run(conn, run["id"])
-    assert r["status"] == "succeeded" and r["finished_at"] and "FAIL" not in r["checks"]
-    assert [f["status"] for f in mail.fixes] == ["succeeded"]
+    r = op_run(store, run.id)
+    assert r.status == "succeeded" and r.finished_at and "FAIL" not in r.checks
+    assert [f.status for f in mail.fixes] == ["succeeded"]
     e.step()
     assert len(mail.fixes) == 1                                       # each outcome mailed once
-    rec = {x["operation"]: x for x in db.operation_records(conn)}["restart-csi-nfs-node"]
+    rec = {x["operation"]: x for x in store.operation_records()}["restart-csi-nfs-node"]
     assert (rec["ran"], rec["succeeded"]) == (1, 1)
 
 
 @needs_pg
-def test_post_check_failure_is_reported(conn, tmp_path):
-    e, k8s, runner, mail = setup(conn, tmp_path)
-    run = analysed(conn, e)["fixes"][0]
-    approve(conn, run["id"])
+def test_post_check_failure_is_reported(store, tmp_path):
+    e, k8s, runner, mail = setup(store, tmp_path)
+    run = analysed(store, e).fixes[0]
+    approve(store, run.id)
     e.step()
-    executor.step(conn, Library(None, str(CHART / "operations")), k8s)
-    conn.execute("UPDATE op_runs SET post_due_at = now()")
+    executor.step(store, Library(None, str(CHART / "operations")), k8s)
+    sql(store, "UPDATE op_runs SET post_due_at = now()")
     e.step()                                                          # the mounts came back: Tower's side
-    r = op_run(conn, run["id"])
-    assert r["status"] == "post_failed" and "FAIL: nfs-dstate expects mount_nfs_dstate_total == 0" in r["checks"]
-    assert mail.fixes[-1]["status"] == "post_failed"
+    r = op_run(store, run.id)
+    assert r.status == "post_failed" and "FAIL: nfs-dstate expects mount_nfs_dstate_total == 0" in r.checks
+    assert mail.fixes[-1].status == "post_failed"
 
 
 @needs_pg
-def test_pre_check_refuses_when_the_wedge_has_cleared(conn, tmp_path):
-    e, k8s, runner, mail = setup(conn, tmp_path)
-    run = analysed(conn, e)["fixes"][0]
+def test_pre_check_refuses_when_the_wedge_has_cleared(store, tmp_path):
+    e, k8s, runner, mail = setup(store, tmp_path)
+    run = analysed(store, e).fixes[0]
     runner.dstate = CLEAR
-    approve(conn, run["id"])
+    approve(store, run.id)
     e.step()
-    r = op_run(conn, run["id"])
-    assert r["status"] == "refused" and "FAIL" in r["checks"] and not k8s.deleted
-    assert mail.fixes[-1]["status"] == "refused"
+    r = op_run(store, run.id)
+    assert r.status == "refused" and "FAIL" in r.checks and not k8s.deleted
+    assert mail.fixes[-1].status == "refused"
 
 
 @needs_pg
@@ -249,69 +250,69 @@ def test_pre_check_refuses_when_the_wedge_has_cleared(conn, tmp_path):
     (1, 2.5, "FAIL: tower-load-now expects load15_per_core.0.value < 1"),                    # Tower's nfsd in trouble
     (1, None, "FAIL: tower-load-now expects load15_per_core.0.value < 1; load15_per_core.0.value = null"),
 ])
-def test_pre_check_refuses_when_the_server_is_the_problem(conn, tmp_path, wedged, tower, why):
-    e, k8s, runner, mail = setup(conn, tmp_path)
-    run = analysed(conn, e)["fixes"][0]
+def test_pre_check_refuses_when_the_server_is_the_problem(store, tmp_path, wedged, tower, why):
+    e, k8s, runner, mail = setup(store, tmp_path)
+    run = analysed(store, e).fixes[0]
     assert isinstance(runner.prom, ClusterProm)
     runner.prom.wedged, runner.prom.tower = wedged, tower
-    approve(conn, run["id"])
+    approve(store, run.id)
     e.step()
-    r = op_run(conn, run["id"])
-    assert r["status"] == "refused" and why in r["checks"] and not k8s.deleted
+    r = op_run(store, run.id)
+    assert r.status == "refused" and why in r.checks and not k8s.deleted
 
 
 @needs_pg
-def test_limits_and_changed_operation_refuse(conn, tmp_path):
-    e, k8s, runner, mail = setup(conn, tmp_path)
-    first = analysed(conn, e)["fixes"][0]
-    approve(conn, first["id"])
+def test_limits_and_changed_operation_refuse(store, tmp_path):
+    e, k8s, runner, mail = setup(store, tmp_path)
+    first = analysed(store, e).fixes[0]
+    approve(store, first.id)
     e.step()
-    assert op_run(conn, first["id"])["status"] == "ready"
-    second = db.add_op_run(conn, first["incident_id"], first["operation"], first["op_rev"], first["params"],
+    assert op_run(store, first.id).status == "ready"
+    second = store.add_op_run(first.incident_id, first.operation, first.op_rev, first.params,
                            "approve", FixStatus.PROPOSED)
-    approve(conn, second)
+    approve(store, second)
     e.step()
-    assert op_run(conn, second)["error"].startswith("limit: restart-csi-nfs-node already ran 1 time")
-    third = db.add_op_run(conn, first["incident_id"], first["operation"], "0ldrev", {"node": "k8s-worker2"},
+    assert op_run(store, second).error.startswith("limit: restart-csi-nfs-node already ran 1 time")
+    third = store.add_op_run(first.incident_id, first.operation, "0ldrev", {"node": "k8s-worker2"},
                           "approve", FixStatus.PROPOSED)
-    approve(conn, third)
+    approve(store, third)
     e.step()
-    assert "changed since it was proposed" in op_run(conn, third)["error"]
+    assert "changed since it was proposed" in op_run(store, third).error
 
 
 @needs_pg
-def test_executor_refuses_what_the_operation_does_not_allow(conn, tmp_path):
+def test_executor_refuses_what_the_operation_does_not_allow(store, tmp_path):
     lib = Library(None, str(CHART / "operations"))
     lib.refresh()
     op = lib.operations["restart-csi-nfs-node"]
-    inc_id, _ = db.record_firing(conn, wedge_alert())
+    inc_id, _ = store.record_firing(wedge_alert())
     for params in ({"node": "k8s-worker1 --all"}, {"node": "k8s-worker1", "namespace": "default"}):
-        rid = db.add_op_run(conn, inc_id, op.name, op.rev, params, "approve", FixStatus.READY)
-        executor.step(conn, lib, cluster())
-        assert op_run(conn, rid)["status"] == "failed"
+        rid = store.add_op_run(inc_id, op.name, op.rev, params, "approve", FixStatus.READY)
+        executor.step(store, lib, cluster())
+        assert op_run(store, rid).status == "failed"
     k8s = cluster(pods=2)                                             # selector matches more than maxPods
-    rid = db.add_op_run(conn, inc_id, op.name, op.rev, {"node": "k8s-worker1"}, "approve", FixStatus.READY)
-    executor.step(conn, lib, k8s)
-    r = op_run(conn, rid)
-    assert r["status"] == "failed" and "more than maxPods=1" in r["error"] and not k8s.deleted
+    rid = store.add_op_run(inc_id, op.name, op.rev, {"node": "k8s-worker1"}, "approve", FixStatus.READY)
+    executor.step(store, lib, k8s)
+    r = op_run(store, rid)
+    assert r.status == "failed" and "more than maxPods=1" in r.error and not k8s.deleted
 
 
 @needs_pg
-def test_decisions_need_sign_in_and_json(conn):
-    inc_id, _ = db.record_firing(conn, wedge_alert())
-    rid = db.add_op_run(conn, inc_id, "restart-csi-nfs-node", "r", {"node": "n"}, "approve", FixStatus.PROPOSED)
-    assert approve(conn, rid, ui_settings()).status_code == 403              # open LAN page: no approvals
-    with TestClient(create_ui_app(conn.info.dsn, ui_settings(allow_anonymous_decisions=True))) as c:
+def test_decisions_need_sign_in_and_json(store):
+    inc_id, _ = store.record_firing(wedge_alert())
+    rid = store.add_op_run(inc_id, "restart-csi-nfs-node", "r", {"node": "n"}, "approve", FixStatus.PROPOSED)
+    assert approve(store, rid, ui_settings()).status_code == 403              # open LAN page: no approvals
+    with TestClient(create_ui_app(store, ui_settings(allow_anonymous_decisions=True))) as c:
         assert c.post(f"/api/fixes/{rid}/approve", content="x",
                       headers={"content-type": "application/x-www-form-urlencoded"}).status_code == 415
         assert c.get("/api/me").json() == {"user": None, "can_decide": True}
         assert c.post(f"/api/fixes/{rid}/reject", json={}).json()["status"] == "rejected"
-    sid = db.add_op_run(conn, inc_id, "restart-csi-nfs-node", "r", {"node": "n"}, "suggest", FixStatus.SUGGESTED)
-    assert approve(conn, sid).status_code == 409                      # suggest-only never runs from here
+    sid = store.add_op_run(inc_id, "restart-csi-nfs-node", "r", {"node": "n"}, "suggest", FixStatus.SUGGESTED)
+    assert approve(store, sid).status_code == 409                      # suggest-only never runs from here
 
 
 def test_signed_in_ui_redirects_and_guards_the_api():
-    app = create_ui_app("postgresql://unused", ui_settings(oidc_issuer="https://auth.example/application/o/x/",
+    app = create_ui_app(db.Store("postgresql://unused"), ui_settings(oidc_issuer="https://auth.example/application/o/x/",
                                                        oidc_client_id="io", oidc_client_secret="s"))
     c = TestClient(app)                                               # no `with`: the pool isn't needed
     assert c.get("/api/incidents").status_code == 401
@@ -337,7 +338,7 @@ def test_chart_generates_rbac_from_the_fix_files():
 # -- run-now and resume ------------------------------------------------------------------------------------------------
 
 SJOB = "/apis/scrape.danwils.com/v1alpha1/namespaces/gyopart/scrapejobs/site-a"
-SITE = {"target": {"kind": "ScrapeJob", "name": "site-a", "namespace": "gyopart"}, "labels": {}}
+SITE = Incident(target={"kind": "ScrapeJob", "name": "site-a", "namespace": "gyopart"}, labels={})
 
 
 class JobStartProm(Prometheus):
@@ -405,24 +406,24 @@ def test_scrapejob_post_checks(which, status, started, passes):
 
 
 @needs_pg
-def test_executor_annotates_only_where_allowed(conn):
+def test_executor_annotates_only_where_allowed(store):
     lib = Library(None, str(CHART / "operations"))
     lib.refresh()
     op = lib.operations["run-scrapejob-now"]
-    inc_id, _ = db.record_firing(conn, alert("s1", alertname="ScrapeJobFailing"))
+    inc_id, _ = store.record_firing(alert("s1", alertname="ScrapeJobFailing"))
     k8s = cluster()
-    rid = db.add_op_run(conn, inc_id, op.name, op.rev, {"namespace": "gyopart-dev", "name": "site-a"},
+    rid = store.add_op_run(inc_id, op.name, op.rev, {"namespace": "gyopart-dev", "name": "site-a"},
                         "approve", FixStatus.READY)
-    executor.step(conn, lib, k8s)
-    assert op_run(conn, rid)["status"] == "failed" and not k8s.patched
-    rid = db.add_op_run(conn, inc_id, op.name, op.rev, {"namespace": "gyopart", "name": "site-a"}, "approve",
+    executor.step(store, lib, k8s)
+    assert op_run(store, rid).status == "failed" and not k8s.patched
+    rid = store.add_op_run(inc_id, op.name, op.rev, {"namespace": "gyopart", "name": "site-a"}, "approve",
                         FixStatus.READY)
-    executor.step(conn, lib, k8s)
-    assert op_run(conn, rid)["status"] == "settling"
+    executor.step(store, lib, k8s)
+    assert op_run(store, rid).status == "settling"
     want = {"metadata": {"annotations": {"scrape.danwils.com/run-now": f"incident-operator-{rid}"}}}
     assert k8s.patched == [(SJOB, want)]
 
 
 def _mail_text(e, inc):
     from incident_operator.notify import compose
-    return compose(db.incident(e.conn, inc["id"]), smtp_config(sender="a@b", to=["c@d"])).get_content()
+    return compose(e.store.incident(inc.id), smtp_config(sender="a@b", to=["c@d"])).get_content()
