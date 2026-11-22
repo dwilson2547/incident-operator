@@ -92,3 +92,10 @@ as untyped dicts. It becomes SQLAlchemy 2.0 models and Alembic migrations (docs/
 - [x] Startup runs `schema.upgrade` instead of `SCHEMA`, and refuses a database with the tables and no
       `alembic_version` rather than guess; production stamped at `0001` first (docs/database.md).
 - [ ] Final check: the API's JSON responses from old and new code, on a copy of production data, compared.
+
+Where this stands (2026-11-21): steps 2 and 3 are on `main` but not released; production still runs `sha-ca1ed6e7bcd4`
+(the old DDL code), which ignores the `alembic_version` table the stamp added. The final check comes before the
+release. Plan: restore a read-only dump of production locally, run both images against it, and diff
+`/api/incidents`, every `/api/incidents/{id}`, `/api/runbooks` and `/metrics`. Expected differences, anything else
+is a regression: `related` rows lose their per-row `total`/`close`, timestamp formatting may differ, `repeats` comes
+from its own query. Sections 6-8 follow the release.

@@ -2,6 +2,10 @@
 
 ## Next
 
+- [ ] **Finish the code-quality pass** (2026-11-21, docs/code-quality.md). Next: the old/new API comparison on a
+  copy of production (§9 "Where this stands"), then release `main`, then sections 6-8. Production is stamped at
+  Alembic `0001`; the new image refuses an unstamped database.
+
 - [ ] **Triage a group of alerts as one** (user, 2026-11-05; future step).
   When several alerts land together, triage one, attach the others, send one email, instead of one model run and one
   email each. Today each is triaged alone and sees the others through the context block (design §6.7). Worth doing if
